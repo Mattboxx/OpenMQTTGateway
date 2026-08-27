@@ -1018,10 +1018,12 @@ void pubMqttDiscovery() {
       continue;
     }
     String stateTopic = gpioInputTopic(channel);
+    const char* payloadOn = gpioInputChannels[channel].activeLevel == HIGH ? "HIGH" : "LOW";
+    const char* payloadOff = gpioInputChannels[channel].activeLevel == HIGH ? "LOW" : "HIGH";
     createDiscovery("binary_sensor",
                     stateTopic.c_str(), gpioInputChannels[channel].name, uniqueId.c_str(),
-                    will_Topic, "", jsonGpio,
-                    INPUT_GPIO_ON_VALUE, INPUT_GPIO_OFF_VALUE, "",
+                    will_Topic, gpioInputDeviceClassName(gpioInputChannels[channel].deviceClass), jsonGpio,
+                    payloadOn, payloadOff, "",
                     0, Gateway_AnnouncementMsg, will_Message, true, "",
                     "", "", "", "", false, // device name, device manufacturer, device model, device ID, retain
                     stateClassNone //State Class

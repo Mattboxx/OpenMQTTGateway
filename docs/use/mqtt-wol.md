@@ -62,8 +62,11 @@ The application image is written to:
 ```
 
 The inherited CC1101 wiring is CS 5, GDO0 12 and GDO2 27. The first contact
-input defaults to GPIO 4. Review the [GPIO input configuration](sensors.md#gpio-input)
-before connecting additional sensors.
+input defaults to GPIO 4 in driven `INPUT` mode, preserving the original garage
+sensor configuration. Electrical mode, active level, debounce and Home
+Assistant type can be selected independently for every channel. Review the
+[GPIO input configuration](sensors.md#gpio-input) before connecting additional
+sensors.
 
 ## Configure WOL
 

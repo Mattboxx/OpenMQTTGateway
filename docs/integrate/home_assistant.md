@@ -44,7 +44,9 @@ Some devices may require a button push or motion/contact event to trigger a mess
 
 Builds with runtime multi-GPIO support create one binary-sensor entity for each
 enabled contact input. Its configured WebUI name is used as the Home Assistant
-entity name. Disabled channels have their stale discovery topic removed.
+entity name. The configured active HIGH/LOW level determines its ON and OFF
+payloads, while the selected device class controls its icon and semantics.
+Disabled channels have their stale discovery topic removed.
 
 Builds with [MQTT outage Wake-on-LAN](../use/mqtt-wol.md) add a text entity for
 the destination MAC address and a switch for enabling the policy. The remaining

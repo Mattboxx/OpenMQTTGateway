@@ -38,7 +38,7 @@ struct GPIOInputChannelState_s {
   int previousReading;
 };
 
-GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput"}};
+GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput", GPIO_INPUT_DEFAULT_MODE, GPIO_INPUT_ACTIVE_LEVEL, GPIOInputDebounceDelay, GPIO_INPUT_CLASS_NONE}};
 GPIOInputChannelState_s gpioInputStates[GPIO_INPUT_MAX];
 
 String gpioInputTopic(uint8_t channel) {
@@ -46,23 +46,57 @@ String gpioInputTopic(uint8_t channel) {
   return String(subjectGPIOInputtoMQTT) + "/" + String(channel + 1);
 }
 
-const char* gpioInputPinValidationError(int pin) {
+const char* gpioInputModeName(uint8_t mode) {
+  switch (mode) {
+    case GPIO_INPUT_MODE_PULLUP:
+      return "PULLUP";
+    case GPIO_INPUT_MODE_PULLDOWN:
+      return "PULLDOWN";
+    case GPIO_INPUT_MODE_INPUT:
+    default:
+      return "INPUT";
+  }
+}
+
+const char* gpioInputDeviceClassName(uint8_t deviceClass) {
+  static const char* const deviceClasses[GPIO_INPUT_CLASS_COUNT] = {
+      "", "opening", "door", "garage_door", "window", "motion",
+      "occupancy", "moisture", "smoke", "vibration", "problem"};
+  return deviceClass < GPIO_INPUT_CLASS_COUNT ? deviceClasses[deviceClass] : "";
+}
+
+static uint8_t gpioInputArduinoMode(uint8_t mode) {
+  if (mode == GPIO_INPUT_MODE_PULLUP) return INPUT_PULLUP;
+#  if defined(ESP32)
+  if (mode == GPIO_INPUT_MODE_PULLDOWN) return INPUT_PULLDOWN;
+#  elif defined(ESP8266)
+  if (mode == GPIO_INPUT_MODE_PULLDOWN) return INPUT_PULLDOWN_16;
+#  endif
+  return INPUT;
+}
+
+const char* gpioInputPinValidationError(int pin, uint8_t mode) {
 #  if !defined(GPIO_INPUT_RUNTIME_CONFIG)
   (void)pin;
+  (void)mode;
   return nullptr;
 #  else
+  if (mode >= GPIO_INPUT_MODE_COUNT)
+    return "input mode is not supported";
 #  if defined(ESP32)
   if (pin < 0 || pin > 39 || pin == 20 || pin == 24 || (pin >= 28 && pin <= 31))
     return "GPIO is not available on a classic ESP32";
   if (pin >= 6 && pin <= 11)
     return "GPIO is reserved for ESP32 flash memory";
-  if (GPIO_INPUT_TYPE == INPUT_PULLUP && pin >= 34)
-    return "GPIO 34-39 do not provide an internal pull-up";
+  if (mode != GPIO_INPUT_MODE_INPUT && pin >= 34)
+    return "GPIO 34-39 do not provide internal pull resistors";
 #  elif defined(ESP8266)
   if (pin < 0 || pin > 16)
     return "GPIO is not available on ESP8266";
   if (pin >= 6 && pin <= 11)
     return "GPIO is reserved for ESP8266 flash memory";
+  if (mode == GPIO_INPUT_MODE_PULLDOWN && pin != 16)
+    return "ESP8266 internal pull-down is available only on GPIO 16";
 #  elif defined(ARDUINO)
   if (pin < 0)
     return "GPIO must be zero or greater";
@@ -105,12 +139,21 @@ void setupGPIOInput() {
   for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
     GPIOInputChannelConfig_s& config = gpioInputChannels[channel];
     GPIOInputChannelState_s& state = gpioInputStates[channel];
+    if (config.debounceMs < GPIO_INPUT_DEBOUNCE_MIN || config.debounceMs > GPIO_INPUT_DEBOUNCE_MAX) {
+      config.mode = GPIO_INPUT_DEFAULT_MODE;
+      config.activeLevel = GPIO_INPUT_ACTIVE_LEVEL;
+      config.debounceMs = GPIOInputDebounceDelay;
+      config.deviceClass = GPIO_INPUT_CLASS_NONE;
+    }
+    if (config.mode >= GPIO_INPUT_MODE_COUNT) config.mode = GPIO_INPUT_DEFAULT_MODE;
+    if (config.activeLevel != LOW && config.activeLevel != HIGH) config.activeLevel = GPIO_INPUT_ACTIVE_LEVEL;
+    if (config.deviceClass >= GPIO_INPUT_CLASS_COUNT) config.deviceClass = GPIO_INPUT_CLASS_NONE;
     state.lastDebounceTime = millis();
     state.stableState = 3;
     state.previousReading = 3;
     if (!config.enabled) continue;
 
-    const char* validationError = gpioInputPinValidationError(config.pin);
+    const char* validationError = gpioInputPinValidationError(config.pin, config.mode);
     if (validationError) {
       Log.error(F("[GPIO] disabling channel=%u pin=%u reason=%s" CR), channel + 1, config.pin, validationError);
       config.enabled = false;
@@ -127,12 +170,14 @@ void setupGPIOInput() {
     if (!config.enabled) continue;
     if (!config.name[0]) snprintf(config.name, sizeof(config.name), "GPIO Input %u", channel + 1);
 
-    pinMode(config.pin, GPIO_INPUT_TYPE);
+    pinMode(config.pin, gpioInputArduinoMode(config.mode));
     const int initialReading = digitalRead(config.pin);
     state.previousReading = initialReading;
-    Log.notice(F("[GPIO] input initialized channel=%u name=%s pin=%u debounce_ms=%u initial=%s mqtt_topic=%s" CR),
-               channel + 1, config.name, config.pin, GPIOInputDebounceDelay,
-               initialReading == HIGH ? "HIGH" : "LOW", gpioInputTopic(channel).c_str());
+    Log.notice(F("[GPIO] input initialized channel=%u name=%s pin=%u mode=%s active=%s debounce_ms=%u class=%s initial=%s mqtt_topic=%s" CR),
+               channel + 1, config.name, config.pin, gpioInputModeName(config.mode),
+               config.activeLevel == HIGH ? "HIGH" : "LOW", config.debounceMs,
+               gpioInputDeviceClassName(config.deviceClass), initialReading == HIGH ? "HIGH" : "LOW",
+               gpioInputTopic(channel).c_str());
   }
 }
 
@@ -149,7 +194,7 @@ void MeasureGPIOInput() {
                 channel + 1, config.pin, state.previousReading, reading, state.lastDebounceTime);
     }
 
-    if ((millis() - state.lastDebounceTime) > GPIOInputDebounceDelay) {
+    if ((millis() - state.lastDebounceTime) > config.debounceMs) {
     // whatever the reading is at, it's been there for longer than the debounce
     // delay, so take it as the actual current state:
     yield();
@@ -189,12 +234,15 @@ void MeasureGPIOInput() {
       }
       GPIOdata["pin"] = config.pin;
       GPIOdata["name"] = config.name;
+      GPIOdata["active"] = reading == config.activeLevel;
+      GPIOdata["mode"] = gpioInputModeName(config.mode);
       GPIOdata["origin"] = gpioInputTopic(channel);
       const bool queued = enqueueJsonObject(GPIOdata);
-      Log.notice(F("[GPIO] stable change channel=%u name=%s pin=%u previous=%s current=%s queued=%T mqtt_connected=%T queue=%d uptime_ms=%l" CR),
+      Log.notice(F("[GPIO] stable change channel=%u name=%s pin=%u previous=%s current=%s active=%T queued=%T mqtt_connected=%T queue=%d uptime_ms=%l" CR),
                  channel + 1, config.name, config.pin,
                  previousStableState == 3 ? "UNKNOWN" : (previousStableState == HIGH ? "HIGH" : "LOW"),
-                 reading == HIGH ? "HIGH" : "LOW", queued, mqtt && mqtt->connected(), queueLength, millis());
+                 reading == HIGH ? "HIGH" : "LOW", reading == config.activeLevel,
+                 queued, mqtt && mqtt->connected(), queueLength, millis());
 
 #  if defined(ZactuatorONOFF) && defined(ACTUATOR_TRIGGER)
       //Trigger the actuator if we are not at startup

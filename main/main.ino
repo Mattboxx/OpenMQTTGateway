@@ -2259,7 +2259,7 @@ void saveConfig() {
 
   int totalSize = 1024;
 #  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
-  totalSize += GPIO_INPUT_MAX * (JSON_OBJECT_SIZE(3) + GPIO_INPUT_NAME_SIZE + 16);
+  totalSize += GPIO_INPUT_MAX * (JSON_OBJECT_SIZE(7) + GPIO_INPUT_NAME_SIZE + 32);
 #  endif
 #  if !MQTT_BROKER_MODE
   for (int i = 0; i < 3; ++i) { // index 0 contains the default values from the build, these values can't be changed at runtime
@@ -2359,6 +2359,10 @@ void saveConfig() {
     gpioInput["enabled"] = gpioInputChannels[channel].enabled;
     gpioInput["pin"] = gpioInputChannels[channel].pin;
     gpioInput["name"] = gpioInputChannels[channel].name;
+    gpioInput["mode"] = gpioInputChannels[channel].mode;
+    gpioInput["active_level"] = gpioInputChannels[channel].activeLevel;
+    gpioInput["debounce_ms"] = gpioInputChannels[channel].debounceMs;
+    gpioInput["device_class"] = gpioInputChannels[channel].deviceClass;
   }
 #  endif
 
@@ -2555,9 +2559,26 @@ bool loadConfigFromFlash() {
             const char* storedName = storedGPIOInput["name"] | "";
             strncpy(gpioInputChannels[channel].name, storedName, sizeof(gpioInputChannels[channel].name) - 1);
             gpioInputChannels[channel].name[sizeof(gpioInputChannels[channel].name) - 1] = '\0';
-            Log.notice(F("[GPIO] configuration loaded channel=%u enabled=%T name=%s pin=%u" CR),
+            gpioInputChannels[channel].mode = storedGPIOInput["mode"] | (uint8_t)GPIO_INPUT_DEFAULT_MODE;
+            gpioInputChannels[channel].activeLevel = storedGPIOInput["active_level"] | (uint8_t)GPIO_INPUT_ACTIVE_LEVEL;
+            gpioInputChannels[channel].debounceMs = storedGPIOInput["debounce_ms"] | (uint16_t)GPIOInputDebounceDelay;
+            gpioInputChannels[channel].deviceClass = storedGPIOInput["device_class"] | (uint8_t)GPIO_INPUT_CLASS_NONE;
+            if (gpioInputChannels[channel].mode >= GPIO_INPUT_MODE_COUNT)
+              gpioInputChannels[channel].mode = GPIO_INPUT_DEFAULT_MODE;
+            if (gpioInputChannels[channel].activeLevel != LOW && gpioInputChannels[channel].activeLevel != HIGH)
+              gpioInputChannels[channel].activeLevel = GPIO_INPUT_ACTIVE_LEVEL;
+            if (gpioInputChannels[channel].debounceMs < GPIO_INPUT_DEBOUNCE_MIN ||
+                gpioInputChannels[channel].debounceMs > GPIO_INPUT_DEBOUNCE_MAX)
+              gpioInputChannels[channel].debounceMs = GPIOInputDebounceDelay;
+            if (gpioInputChannels[channel].deviceClass >= GPIO_INPUT_CLASS_COUNT)
+              gpioInputChannels[channel].deviceClass = GPIO_INPUT_CLASS_NONE;
+            Log.notice(F("[GPIO] configuration loaded channel=%u enabled=%T name=%s pin=%u mode=%s active=%s debounce_ms=%u class=%s" CR),
                        channel + 1, gpioInputChannels[channel].enabled,
-                       gpioInputChannels[channel].name, gpioInputChannels[channel].pin);
+                       gpioInputChannels[channel].name, gpioInputChannels[channel].pin,
+                       gpioInputModeName(gpioInputChannels[channel].mode),
+                       gpioInputChannels[channel].activeLevel == HIGH ? "HIGH" : "LOW",
+                       gpioInputChannels[channel].debounceMs,
+                       gpioInputDeviceClassName(gpioInputChannels[channel].deviceClass));
             channel++;
           }
         }

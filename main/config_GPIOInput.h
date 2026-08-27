@@ -37,14 +37,49 @@ extern void forcePublishGPIOState();
 #  define GPIO_INPUT_NAME_SIZE 32
 #endif
 
+enum GPIOInputMode : uint8_t {
+  GPIO_INPUT_MODE_INPUT = 0,
+  GPIO_INPUT_MODE_PULLUP,
+  GPIO_INPUT_MODE_PULLDOWN,
+  GPIO_INPUT_MODE_COUNT
+};
+
+enum GPIOInputDeviceClass : uint8_t {
+  GPIO_INPUT_CLASS_NONE = 0,
+  GPIO_INPUT_CLASS_OPENING,
+  GPIO_INPUT_CLASS_DOOR,
+  GPIO_INPUT_CLASS_GARAGE_DOOR,
+  GPIO_INPUT_CLASS_WINDOW,
+  GPIO_INPUT_CLASS_MOTION,
+  GPIO_INPUT_CLASS_OCCUPANCY,
+  GPIO_INPUT_CLASS_MOISTURE,
+  GPIO_INPUT_CLASS_SMOKE,
+  GPIO_INPUT_CLASS_VIBRATION,
+  GPIO_INPUT_CLASS_PROBLEM,
+  GPIO_INPUT_CLASS_COUNT
+};
+
+#ifndef GPIO_INPUT_DEBOUNCE_MIN
+#  define GPIO_INPUT_DEBOUNCE_MIN 10
+#endif
+#ifndef GPIO_INPUT_DEBOUNCE_MAX
+#  define GPIO_INPUT_DEBOUNCE_MAX 5000
+#endif
+
 struct GPIOInputChannelConfig_s {
   bool enabled;
   uint8_t pin;
   char name[GPIO_INPUT_NAME_SIZE];
+  uint8_t mode;
+  uint8_t activeLevel;
+  uint16_t debounceMs;
+  uint8_t deviceClass;
 };
 
 extern GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX];
-extern const char* gpioInputPinValidationError(int pin);
+extern const char* gpioInputPinValidationError(int pin, uint8_t mode);
+extern const char* gpioInputModeName(uint8_t mode);
+extern const char* gpioInputDeviceClassName(uint8_t deviceClass);
 extern String gpioInputTopic(uint8_t channel);
 /*----------------------------USER PARAMETERS-----------------------------*/
 /*-------------DEFINE YOUR MQTT PARAMETERS BELOW----------------*/
@@ -62,6 +97,20 @@ extern String gpioInputTopic(uint8_t channel);
 
 #ifndef GPIO_INPUT_TYPE
 #  define GPIO_INPUT_TYPE INPUT_PULLUP
+#endif
+
+#ifndef GPIO_INPUT_DEFAULT_MODE
+#  if GPIO_INPUT_TYPE == INPUT_PULLUP
+#    define GPIO_INPUT_DEFAULT_MODE GPIO_INPUT_MODE_PULLUP
+#  elif defined(INPUT_PULLDOWN) && GPIO_INPUT_TYPE == INPUT_PULLDOWN
+#    define GPIO_INPUT_DEFAULT_MODE GPIO_INPUT_MODE_PULLDOWN
+#  else
+#    define GPIO_INPUT_DEFAULT_MODE GPIO_INPUT_MODE_INPUT
+#  endif
+#endif
+
+#ifndef GPIO_INPUT_ACTIVE_LEVEL
+#  define GPIO_INPUT_ACTIVE_LEVEL HIGH
 #endif
 
 #define INPUT_GPIO_ON_VALUE  "HIGH"

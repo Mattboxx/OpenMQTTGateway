@@ -30,9 +30,9 @@
 
 // TODO: Create a script to generate these from WebPack
 
-#define body_footer_main_menu   "<div id=but2d style=\"display: block;\"></div><p><form id=but2 style=\"display: block;\" action='.' method='get'><button>Main Menu</button></form></p>"
-#define body_footer_config_menu "<div id=but3d style=\"display: block;\"></div><p><form id=but3 style=\"display: block;\" action='cn' method='get'><button>Configuration</button></form></p>"
-#define body_header             "<body><div style='text-align:left;display:inline-block;min-width:360px;'><div style='text-align:center;'><noscript> To use, please enable JavaScript <br></noscript><h3>%s</h3><h2>%s</h2></div>"
+#define body_footer_main_menu   "<div id=but2d></div><p><form id=but2 action='.' method='get'><button class='secondary'>Back to main menu</button></form></p>"
+#define body_footer_config_menu "<div id=but3d></div><p><form id=but3 action='cn' method='get'><button class='secondary'>Back to configuration</button></form></p>"
+#define body_header             "<body><main class='page'><header class='page-header'><noscript>Enable JavaScript to use this interface.<br></noscript><div class='module-list'>%s</div><h1>%s</h1></header>"
 
 #if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
 #  define button_upgrade "<p><form id=but5 style='display: block;' action='up' method='get'><button>Firmware Upgrade</button></form></p>"
@@ -41,29 +41,29 @@
 #endif
 // Configuration Menu
 
-#define configure_1 "<p><form action='wi' method='post'><button>Configure WiFi</button></form></p>"
-#define configure_2 "<p><form action='mq' method='post'><button>Configure MQTT</button></form></p>"
+#define configure_1 "<p><form action='wi' method='post'><button>WiFi network</button></form></p>"
+#define configure_2 "<p><form action='mq' method='post'><button>MQTT and recovery</button></form></p>"
 /*#if defined(ZgatewayCloud)
 #  define configure_3 "<p><form action='cl' method='get'><button>Configure Cloud</button></form></p>"
 #else
 #  define configure_3
 #endif*/
 #ifndef ESPWifiManualSetup
-#  define configure_3 "<p><form action='cg' method='post'><button>Configure Gateway</button></form></p>"
+#  define configure_3 "<p><form action='cg' method='post'><button>Gateway security</button></form></p>"
 #else
 #  define configure_3
 #endif
-#define configure_4 "<p><form action='wu' method='get'><button>Configure WebUI</button></form></p>"
-#define configure_5 "<p><form action='lo' method='get'><button>Configure Logging</button></form></p>"
+#define configure_4 "<p><form action='wu' method='get'><button>Web interface</button></form></p>"
+#define configure_5 "<p><form action='lo' method='get'><button>Logging</button></form></p>"
 #ifdef ZgatewayLORA
-#  define configure_6 "<p><form action='la' method='get'><button>Configure LORA</button></form></p>"
+#  define configure_6 "<p><form action='la' method='get'><button>LoRa radio</button></form></p>"
 #elif defined(ZgatewayRTL_433) || defined(ZgatewayPilight) || defined(ZgatewayRF) || defined(ZgatewayRF2) || defined(ZactuatorSomfy)
-#  define configure_6 "<p><form action='rf' method='get'><button>Configure RF</button></form></p>"
+#  define configure_6 "<p><form action='rf' method='get'><button>RF receiver</button></form></p>"
 #else
 #  define configure_6
 #endif
 #if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
-#  define configure_7 "<p><form action='gi' method='get'><button>Configure GPIO Inputs</button></form></p>"
+#  define configure_7 "<p><form action='gi' method='get'><button>GPIO input sensors</button></form></p>"
 #else
 #  define configure_7
 #endif
@@ -85,9 +85,9 @@ const char wifi_script[] = "function c(l) {eb('s1').value = l.innerText || l.tex
 
 const char script[] = "function jd() { var t = 0, i = document.querySelectorAll('input,button,textarea,select'); while (i.length >= t) { if (i[t]) { i[t]['name'] = (i[t].hasAttribute('id') && (!i[t].hasAttribute('name'))) ? i[t]['id'] : i[t]['name']; } t++; } } wl(jd); </script>";
 
-const char style[] = "<style> div, fieldset, input, select { padding: 5px; font-size: 1em; } fieldset { background: #2F2F2F; color: #DDDDDD;} legend {float: left; font-size: 1.3em;} legend span {position: absolute; top: 10px; left: 10px;} fieldset.set1 { background: #DDDDDD; color: #2E2F2F; position: relative; padding-top: 40px;} p { margin: 0.5em 0; } input { width: 100%; box-sizing: border-box; -webkit-box-sizing: border-box; -moz-box-sizing: border-box; background: #EEEEEE; color: #2F2F2F; } input[type=checkbox], input[type=radio] { width: 1em; margin-right: 6px; vertical-align: -1px; } input[type=range] { width: 99%; } select { width: 100%; background: #EEEEEE; color: #2F2F2F; } textarea { resize: vertical; width: 98%; height: 318px; padding: 5px; overflow: auto; background: #2F2F2F; color: #FFA900; } body { text-align: center; font-family: verdana, sans-serif; background: #EEEEEE; color:#2E2F2F;} td { padding: 0px; } button { border: 0; border-radius: 0.3rem; background: #4B98D1; color: #faffff; line-height: 2.4rem; font-size: 1.2rem; width: 100%; -webkit-transition-duration: 0.4s; transition-duration: 0.4s; cursor: pointer; } button:hover { background: #025880;font-weight: bold; } .bred { background: #FFA900; } .bred:hover { background: #FF8000; font-weight: bold;} .bgrn { background: #7BB461; } .bgrn:hover { background: #3A772A;font-weight: bold; } a { color: #4B98D1; text-decoration: none; } .p { float: left; text-align: left; } .q { float: right; text-align: right; } .r { border-radius: 0.3em; padding: 2px; margin: 6px 2px; } </style></head>";
+const char style[] = "<style>:root{--bg:#eef3f7;--surface:#fff;--ink:#17212b;--muted:#657383;--line:#d8e1e8;--brand:#1677a8;--brand2:#0b526f;--ok:#26834a;--warn:#b96312;--shadow:0 8px 28px rgba(25,55,75,.11)}*{box-sizing:border-box}body{margin:0;text-align:center;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(145deg,#eaf4f8 0,#f5f7f9 48%,#e9eef3 100%);color:var(--ink);min-height:100vh}.page{width:min(94vw,760px);display:inline-block;text-align:left;padding:24px 0 40px}.page-header{text-align:center;padding:12px 10px 18px}.page-header h1{font-size:clamp(1.45rem,5vw,2.05rem);margin:.2rem 0;letter-spacing:-.025em}.module-list{font-size:.76rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);overflow-wrap:anywhere}fieldset{border:0;border-radius:16px;padding:18px;background:#253441;color:#edf5f8;box-shadow:var(--shadow)}fieldset.set1{background:var(--surface);color:var(--ink)}legend{padding:0 8px;font-size:1.15rem;color:inherit}legend span{position:static}p{margin:.7em 0}input,select,textarea{font:inherit;border:1px solid var(--line);border-radius:9px;padding:10px 11px;background:#f8fafb;color:var(--ink);width:100%;transition:border-color .15s,box-shadow .15s}input:focus,select:focus,textarea:focus{outline:0;border-color:#42a6d2;box-shadow:0 0 0 3px rgba(22,119,168,.14)}input[type=checkbox],input[type=radio]{width:1.1em;height:1.1em;margin-right:8px;accent-color:var(--brand);vertical-align:-2px}input[type=range]{width:99%}textarea{resize:vertical;height:318px;background:#16232d;color:#ffbd55}small,.field-hint{display:block;color:var(--muted);font-size:.78rem;line-height:1.35;margin:3px 0 7px}button{border:0;border-radius:10px;background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;min-height:46px;padding:7px 16px;font-size:1.02rem;font-weight:650;width:100%;transition:transform .15s,box-shadow .15s,filter .15s;cursor:pointer;box-shadow:0 4px 12px rgba(11,82,111,.2)}button:hover{filter:brightness(1.08);box-shadow:0 7px 18px rgba(11,82,111,.25)}button:active{transform:translateY(1px)}button.secondary{background:#fff;color:var(--brand2);border:1px solid var(--line);box-shadow:none}.bred{background:linear-gradient(135deg,#da7a1d,#a94620)}.bgrn{background:linear-gradient(135deg,#3b9b5c,#216d3d)}a{color:var(--brand);text-decoration:none;font-weight:600}.info-box{background:#eaf6fb;border:1px solid #c4e3ef;border-radius:11px;padding:13px 14px;color:#234b5e;line-height:1.45;margin:2px 0 14px}.channel-card{border:1px solid var(--line);border-radius:14px;padding:15px;margin:14px 0;background:linear-gradient(180deg,#fff,#f9fbfc)}.channel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;font-size:1.06rem}.status-chip{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;border-radius:999px;padding:5px 8px;white-space:nowrap;background:#e4e9ed;color:#596672}.status-chip.active{background:#d9f2e2;color:#176b36}.status-chip.idle{background:#e5f0f7;color:#285d78}.toggle-row{display:flex;align-items:center;border-radius:9px;background:#f0f4f7;padding:10px 12px;font-weight:650}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}.input-unit{display:flex}.input-unit input{border-radius:9px 0 0 9px}.input-unit span{display:flex;align-items:center;padding:0 11px;background:#e8eef2;border:1px solid var(--line);border-left:0;border-radius:0 9px 9px 0;color:var(--muted)}td{padding:2px 4px}.p{float:left;text-align:left}.q{float:right;text-align:right}.r{border-radius:.3em;padding:2px;margin:6px 2px}@media(max-width:600px){.page{width:95vw;padding-top:12px}.form-grid{grid-template-columns:1fr}.channel-title{align-items:flex-start;flex-direction:column}.status-chip{align-self:flex-start}fieldset{padding:14px}}</style></head>";
 
-const char root_body[] = body_header "<fieldset><div style='padding:0; height:7.5em; margin-left: 15%%; white-space: pre;' id='l1' name='l1'></div></fieldset><div id=but3d style='display: block;'></div><p><form id=but3 style='display: block;' action='cn' method='get'><button>Configuration</button></form></p><p><form id=but4 style='display: block;' action='in' method='get'><button>Information</button></form></p>" button_upgrade "<p><form id=but14 style='display: block;' action='cs' method='get'><button>Console</button></form></p><p><form id=but0 style='display: block;' action='.' method='get' onsubmit='return confirm(\"Confirm Restart\");'><button name='rst' class='button bred'>Restart</button></form></p>";
+const char root_body[] = body_header "<fieldset><div style='padding:0;height:7.5em;margin-left:15%%;white-space:pre' id='l1' name='l1'></div></fieldset><div id=but3d></div><p><form id=but3 action='cn' method='get'><button>Device configuration</button></form></p><p><form id=but4 action='in' method='get'><button>System information</button></form></p>" button_upgrade "<p><form id=but14 action='cs' method='get'><button>Live console</button></form></p><p><form id=but0 action='.' method='get' onsubmit='return confirm(\"Confirm Restart\");'><button name='rst' class='button bred'>Restart gateway</button></form></p>";
 
 const char config_body[] = body_header "" configure_1 "" configure_2 "" configure_3 "" configure_4 "" configure_5 "" configure_6 "" configure_7 "" configure_8 "<div id=but1d style='display: block;'></div><p><form id=but1 style='display: block;' action='rt' method='get' onsubmit='return confirm(\"Confirm Reset Configuration\");'><button name='non' class='button bred'>Reset Configuration</button></form>" body_footer_main_menu;
 
@@ -243,7 +243,7 @@ const char config_lora_body[] = body_header
     "</form>"
     "</fieldset>" body_footer_config_menu;
 
-const char footer[] = "<div style='text-align:right;font-size:11px;'><hr/><a href='https://community.openmqttgateway.com' target='_blank' style='color:#aaa;'>%s</a></div></div></body></html>";
+const char footer[] = "<footer style='text-align:right;font-size:11px;color:#7c8994;padding:12px 3px'><hr style='border:0;border-top:1px solid #d8e1e8'/><a href='https://community.openmqttgateway.com' target='_blank'>%s</a></footer></main></body></html>";
 
 // Source file - https://github.com/1technophile/OpenMQTTGateway/blob/54decb4b65c7894b926ac3a89de0c6b2a3021506/docs/.vuepress/public/favicon-16x16.png
 // Workflow was, convert to ICO format using an online convertor, then use the desktop utility xxd to convert to byte array

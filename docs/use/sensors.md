@@ -13,10 +13,20 @@ home/OpenMQTTGateway/GPIOInputtoMQTT {"gpio":"HIGH","pin":4,"name":"Garage door"
 ```
 
 Builds with `GPIO_INPUT_RUNTIME_CONFIG=true` can expose several independent
-channels. Open **Configuration > GPIO Inputs** in the WebUI to enable a channel,
-give it a name and choose a pin. The selector hides pins reserved by flash,
-SPI, the CC1101 and enabled RF modules; duplicate enabled pins are rejected.
-The configuration is persisted and applied after a controlled restart.
+channels. Open **Configuration > GPIO input sensors** in the WebUI to configure:
+
+* channel name, GPIO pin and enabled state;
+* electrical mode: driven `INPUT`, internal `PULLUP` or internal `PULLDOWN`;
+* whether HIGH or LOW represents the active state;
+* a per-channel debounce interval from 10 to 5000 ms;
+* the Home Assistant binary-sensor class, such as door, garage door, window,
+  motion, moisture or fault.
+
+The page explains the expected wiring for each electrical mode and displays the
+current HIGH/LOW and active/idle state. The pin selector hides pins reserved by
+flash, SPI, the CC1101 and enabled RF modules; duplicate enabled pins are
+rejected. The configuration is persisted and applied after a controlled
+restart.
 
 Channel 1 keeps the original `/GPIOInputtoMQTT` topic for compatibility.
 Additional channels publish to `/GPIOInputtoMQTT/2`,
@@ -24,9 +34,14 @@ Additional channels publish to `/GPIOInputtoMQTT/2`,
 after a debounced change and after MQTT reconnects, so retained automation state
 does not depend on waiting for the next physical transition.
 
-The input mode is selected at build time with `GPIO_INPUT_TYPE`. With
-`INPUT_PULLUP`, connect the dry contact between the selected pin and ground.
-GPIO 34-39 on the classic ESP32 cannot provide an internal pull-up.
+With `PULLUP`, connect the dry contact between the selected pin and ground. With
+`PULLDOWN`, connect it between the pin and 3.3 V. Use `INPUT` for a sensor that
+actively drives a 0-3.3 V digital output or already has an external pull
+resistor. GPIO 34-39 on the classic ESP32 do not provide internal pull
+resistors. ESP32 inputs are not 5 V tolerant.
+
+The MQTT payload retains the `gpio` HIGH/LOW value for compatibility and also
+contains an `active` boolean plus the configured electrical `mode`.
 
 ### ADC
 The value is between 0 and 1024 and is transmitted via MQTT when it changes.
