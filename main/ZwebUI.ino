@@ -25,6 +25,7 @@
 #if defined(ZwebUI) && defined(ESP32)
 #  include <ArduinoJson.h>
 #  include <SPIFFS.h>
+#  include <Update.h>
 #  include <WebServer.h> // Docs for this are here - https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer
 
 #  include "ArduinoLog.h"
@@ -1644,6 +1645,132 @@ void handleFavicon() {
 }
 
 #  if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
+bool localFirmwareUploadAuthorized = false;
+bool localFirmwareUploadStarted = false;
+bool localFirmwareUploadSuccess = false;
+size_t localFirmwareUploadBytes = 0;
+size_t localFirmwareNextProgressLog = 0;
+String localFirmwareUploadError;
+
+void setLocalFirmwareUploadError(const String& error) {
+  if (!localFirmwareUploadError.length()) localFirmwareUploadError = error;
+  Log.error(F("[WebUI][OTA] %s" CR), error.c_str());
+}
+
+void handleLocalFirmwareUpload() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    localFirmwareUploadAuthorized = !webUISecure || server.authenticate(www_username, ota_pass);
+    localFirmwareUploadStarted = false;
+    localFirmwareUploadSuccess = false;
+    localFirmwareUploadBytes = 0;
+    localFirmwareNextProgressLog = 256U * 1024U;
+    localFirmwareUploadError = "";
+
+    if (!localFirmwareUploadAuthorized) {
+      Log.warning(F("[WebUI][OTA] rejected unauthenticated local firmware upload" CR));
+      return;
+    }
+
+    String filename = upload.filename;
+    String lowerFilename = filename;
+    lowerFilename.toLowerCase();
+    if (!lowerFilename.endsWith(".bin")) {
+      setLocalFirmwareUploadError("The selected file must have a .bin extension");
+      return;
+    }
+
+    ProcessLock = true;
+#    ifdef ZgatewayBT
+    stopProcessing(true);
+#    endif
+    gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
+    last_ota_activity_millis = millis();
+    lpDisplayPrint("Web OTA in progress");
+
+    Update.clearError();
+    Log.notice(F("[WebUI][OTA] local upload started file=%s available_bytes=%u heap=%u" CR),
+               filename.c_str(), ESP.getFreeSketchSpace(), ESP.getFreeHeap());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+      setLocalFirmwareUploadError(String("Unable to start OTA: ") + Update.errorString());
+      return;
+    }
+    localFirmwareUploadStarted = true;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!localFirmwareUploadAuthorized || !localFirmwareUploadStarted || localFirmwareUploadError.length()) return;
+
+    if (localFirmwareUploadBytes == 0 && (upload.currentSize == 0 || upload.buf[0] != 0xE9)) {
+      setLocalFirmwareUploadError("The file is not an ESP32 application image");
+      Update.abort();
+      return;
+    }
+
+    size_t written = Update.write(upload.buf, upload.currentSize);
+    if (written != upload.currentSize) {
+      setLocalFirmwareUploadError(String("Flash write failed: ") + Update.errorString());
+      Update.abort();
+      return;
+    }
+    localFirmwareUploadBytes += written;
+    last_ota_activity_millis = millis();
+    if (localFirmwareUploadBytes >= localFirmwareNextProgressLog) {
+      Log.notice(F("[WebUI][OTA] local upload progress bytes=%u heap=%u" CR),
+                 localFirmwareUploadBytes, ESP.getFreeHeap());
+      localFirmwareNextProgressLog += 256U * 1024U;
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!localFirmwareUploadAuthorized || !localFirmwareUploadStarted || localFirmwareUploadError.length()) return;
+
+    if (localFirmwareUploadBytes == 0) {
+      setLocalFirmwareUploadError("The uploaded firmware file is empty");
+      Update.abort();
+      return;
+    }
+    if (!Update.end(true) || !Update.isFinished()) {
+      setLocalFirmwareUploadError(String("Firmware validation failed: ") + Update.errorString());
+      return;
+    }
+    localFirmwareUploadSuccess = true;
+    Log.notice(F("[WebUI][OTA] local firmware validated bytes=%u md5=%s" CR),
+               localFirmwareUploadBytes, Update.md5String().c_str());
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (Update.isRunning()) Update.abort();
+    setLocalFirmwareUploadError("Firmware upload aborted by the client");
+    gatewayState = GatewayState::ERROR;
+    delay(100);
+    ESP.restart();
+  }
+}
+
+void handleLocalFirmwareUploadFinished() {
+  WEBUI_SECURE
+  server.sendHeader("Connection", "close");
+
+  char jsonChar[100];
+  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html,
+           (String(gateway_name) + (localFirmwareUploadSuccess ? " - Firmware installed" : " - Firmware upload failed")).c_str());
+  String response = String(buffer) + String(restart_script) + String(script) + String(style);
+  String resultMessage;
+  if (localFirmwareUploadSuccess) {
+    resultMessage = "Local firmware validated and installed (" + String(localFirmwareUploadBytes) + " bytes)";
+  } else {
+    resultMessage = "Firmware was not installed: " + HtmlEscape(localFirmwareUploadError.length() ? localFirmwareUploadError : "upload did not complete");
+  }
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, resultMessage.c_str());
+  response += String(buffer);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
+  response += String(buffer);
+  server.send(localFirmwareUploadSuccess ? 200 : 500, "text/html", response);
+
+  Log.notice(F("[WebUI][OTA] local upload request complete success=%T bytes=%u; restarting" CR),
+             localFirmwareUploadSuccess, localFirmwareUploadBytes);
+  delay(2000);
+  ESPRestart(6);
+}
+
 /**
  * @brief /UP - Firmware Upgrade Page
  * 
@@ -1848,6 +1975,7 @@ void WebUISetup() {
   server.on("/cs", handleCS); // Console
 #  if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
   server.on("/up", handleUP); // Firmware Upgrade
+  server.on("/up-local", HTTP_POST, handleLocalFirmwareUploadFinished, handleLocalFirmwareUpload); // Local firmware upload
 #  endif
   server.on("/cn", handleCN); // Configuration
   server.on("/wi", HTTP_POST, handleWI); // Configure Wifi

@@ -66,6 +66,20 @@ device. MAC input is checked both by Home Assistant and by the firmware.
 - The official 1.8.1 CC1101 backoff, RTL_433 stack/OOM and MQTT queue fixes are
   retained.
 
+## Local WebUI firmware update
+
+Open **Firmware Upgrade**, then **Upgrade from Local File** to upload an
+`esp32dev-multi_receiver` application `.bin` directly from the browser. The
+existing URL and release-level update methods remain available.
+
+The upload is streamed into the inactive OTA partition and never buffered as a
+complete file in RAM. The handler requires WebUI authentication when enabled,
+checks the `.bin` extension and ESP32 image header, reports flash/validation
+errors, and changes the boot partition only after the complete image validates.
+The board restarts into the previous firmware after a failed or interrupted
+upload and into the new firmware after success. Do not remove power during the
+upload, and only install firmware built for the same board and partition layout.
+
 ## Diagnostic logs
 
 Serial logs use stable prefixes so a captured session can be filtered easily:
@@ -77,6 +91,8 @@ Serial logs use stable prefixes so a captured session can be filtered easily:
   reconnect context;
 - `[WOL]`: loaded/saved policy, outage timer, trigger cause and packet result;
 - `[GPIO]`: channel setup, debounced transitions and forced republishing;
+- `[WebUI][OTA]`: local upload authorization, progress, byte count, MD5 and
+  validation errors;
 - `[RF][CC1101]`: pins, frequency, SPI retries and terminal failure;
 - `[QUEUE]`: capacity pressure, blocked messages and mutex timeouts;
 - `[DIAG]`: periodic system snapshot, including current/high-water queue size,
