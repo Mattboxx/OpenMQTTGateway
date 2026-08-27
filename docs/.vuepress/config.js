@@ -69,6 +69,7 @@ module.exports = {
           'use/boards',
           'use/displays',
           'use/gateway',
+          'use/mqtt-wol',
           'use/webui'
         ]
       },

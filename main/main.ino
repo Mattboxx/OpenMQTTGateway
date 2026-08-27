@@ -127,6 +127,9 @@ struct GfSun2000Data {};
 #if defined(ZwebUI) && defined(ESP32)
 #  include "config_WebUI.h"
 #endif
+#ifdef MQTT_WOL_ENABLED
+#  include "config_mqttWOL.h"
+#endif
 #if defined(ZgatewayRF) || defined(ZgatewayRF2) || defined(ZgatewayPilight) || defined(ZactuatorSomfy) || defined(ZgatewayRTL_433)
 #  include "config_RF.h"
 #endif

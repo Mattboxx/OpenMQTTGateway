@@ -198,35 +198,6 @@
 #  define MQTT_RESTART_AFTER_FAILURES maxRetryWatchDog
 #endif
 
-#ifdef MQTT_WOL_ENABLED
-#  ifndef MQTT_WOL_MAC
-#    define MQTT_WOL_MAC ""
-#  endif
-#  ifndef MQTT_WOL_PORT
-#    define MQTT_WOL_PORT 9
-#  endif
-#  ifndef MQTT_WOL_INITIAL_DELAY_MS
-#    define MQTT_WOL_INITIAL_DELAY_MS (60UL * 1000UL)
-#  endif
-#  ifndef MQTT_WOL_REPEAT_INTERVAL_MS
-#    define MQTT_WOL_REPEAT_INTERVAL_MS (20UL * 60UL * 1000UL)
-#  endif
-#  ifndef MQTT_WOL_MIN_FAILURES
-#    define MQTT_WOL_MIN_FAILURES 3
-#  endif
-#  ifndef MQTT_WOL_DEFAULT_ENABLED
-#    define MQTT_WOL_DEFAULT_ENABLED true
-#  endif
-#  ifndef MQTT_WOL_ON_TRANSPORT_ERROR
-#    define MQTT_WOL_ON_TRANSPORT_ERROR true
-#  endif
-#  ifndef MQTT_WOL_ON_BROKER_ERROR
-#    define MQTT_WOL_ON_BROKER_ERROR false
-#  endif
-#  ifndef MQTT_WOL_ON_AUTH_ERROR
-#    define MQTT_WOL_ON_AUTH_ERROR false
-#  endif
-#endif
 #ifndef QueueSemaphoreTimeOutTask
 #  define QueueSemaphoreTimeOutTask 3000 // time out for semaphore retrieval from a task
 #endif

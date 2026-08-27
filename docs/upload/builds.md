@@ -49,6 +49,12 @@ The different listed configurations in `platformio.ini` represent some standard 
 ```
 sets the default settings for ESP8266 (NodeMCU v2) devices using the Plight module.
 
+The same inheritance rule is used by optional combined presets. For example,
+`esp32dev-multi_receiver-wol-gpio` extends the unchanged
+`esp32dev-multi_receiver` environment and adds contact inputs plus
+[MQTT outage Wake-on-LAN](../use/mqtt-wol.md). This keeps the standard build
+available for users who only need the original receiver feature set.
+
 ### *(Option A)* Creating a portable config file
 You could make your configuration changes directly by editing the values in `User_config.h` (for main OMG settings) and `config_XX.h` (for module-specific settings). You could also make most of those changes by instead writing some -D build flags in `platformio.ini`. But for maximum portability, a feature of PlatformIO allows you to make your configurations by creating a new file and listing all of your overrides there. This way, you can pull the latest OMG code changes without losing your configurations, or having to re-enter them manually.
 

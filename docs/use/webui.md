@@ -42,6 +42,24 @@ Details of OpenMQTTGateway Device status
 
 Ability to upgrade firmware by URL or to latest version.
 
+On ESP32 builds with `MQTT_HTTPS_FW_UPDATE`, **Upgrade from Local File** also
+accepts an application `.bin` stored on the computer or phone currently using
+the WebUI. This is useful for custom PlatformIO builds that are not published
+in an online release repository.
+
+The file is streamed directly to the inactive OTA partition. WebUI
+authentication is required when enabled, and the image extension, ESP32 header
+and final flash image are validated before the boot partition changes. A failed
+or interrupted upload leaves the currently running firmware selected.
+
+::: warning
+Upload only a trusted application image built for the same board and partition
+layout. Do not upload a complete flash image or remove power during the update.
+:::
+
+MQTT outage Wake-on-LAN builds add their policy to the MQTT configuration page.
+See [MQTT outage Wake-on-LAN](mqtt-wol.md) for the trigger and timer behaviour.
+
 # Console
 
 Ability to view messages from the OpenMQTTGateway console.  The scope of messages visible in the UI is limited to just the OpenMQTTGateway codebase, messages from the ESP hardware or other libraries are not visible,

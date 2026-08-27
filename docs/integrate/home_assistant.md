@@ -42,6 +42,15 @@ On first and subsequent startups, auto discovery will start. If you want to prev
 Some devices may require a button push or motion/contact event to trigger a message and generate the auto discovery.
 :::
 
+Builds with runtime multi-GPIO support create one binary-sensor entity for each
+enabled contact input. Its configured WebUI name is used as the Home Assistant
+entity name. Disabled channels have their stale discovery topic removed.
+
+Builds with [MQTT outage Wake-on-LAN](../use/mqtt-wol.md) add a text entity for
+the destination MAC address and a switch for enabling the policy. The remaining
+WOL timing and failure-class settings stay in the gateway WebUI to avoid
+cluttering the device with rarely changed entities.
+
 ## RTL_433 auto discovery specificity
 
 Even if the RTL_433 gateway will create automatically the devices and entities, you may lose the link to them when you change the batteries. This is proper to the RF devices. In this case new device and entities will be created. You may bypass this by creating entities through manual configuration that filter following the device model and other parameters and don't take into account the id.

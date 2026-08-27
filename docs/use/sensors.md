@@ -3,6 +3,31 @@ Subscribe to all the messages with mosquitto or open your MQTT client software:
 
 `    sudo mosquitto_sub -t +/# -v`
 
+### GPIO Input
+
+The GPIO Input sensor reads a switch, reed contact, float sensor or other dry
+contact. A stable change is published after the debounce interval:
+
+```text
+home/OpenMQTTGateway/GPIOInputtoMQTT {"gpio":"HIGH","pin":4,"name":"Garage door"}
+```
+
+Builds with `GPIO_INPUT_RUNTIME_CONFIG=true` can expose several independent
+channels. Open **Configuration > GPIO Inputs** in the WebUI to enable a channel,
+give it a name and choose a pin. The selector hides pins reserved by flash,
+SPI, the CC1101 and enabled RF modules; duplicate enabled pins are rejected.
+The configuration is persisted and applied after a controlled restart.
+
+Channel 1 keeps the original `/GPIOInputtoMQTT` topic for compatibility.
+Additional channels publish to `/GPIOInputtoMQTT/2`,
+`/GPIOInputtoMQTT/3`, and so on. Each enabled channel publishes on startup,
+after a debounced change and after MQTT reconnects, so retained automation state
+does not depend on waiting for the next physical transition.
+
+The input mode is selected at build time with `GPIO_INPUT_TYPE`. With
+`INPUT_PULLUP`, connect the dry contact between the selected pin and ground.
+GPIO 34-39 on the classic ESP32 cannot provide an internal pull-up.
+
 ### ADC
 The value is between 0 and 1024 and is transmitted via MQTT when it changes.
 `home/OpenMQTTGateway/ADCtoMQTT {"value":543}`
