@@ -35,19 +35,29 @@ void initCC1101() {
   // Loop on getCC1101() until it returns true and break after 10 attempts
   int delayMS = 16;
   int delayMaxMS = 500;
+  bool connected = false;
+  const unsigned long initStarted = millis();
+  Log.notice(F("[RF][CC1101] initialization started frequency_mhz=%F cs=%d gdo0=%d gdo2=%d max_attempts=10" CR),
+             RFConfig.frequency, RF_MODULE_CS, RF_MODULE_GDO0, RF_MODULE_GDO2);
   for (int i = 0; i < 10; i++) {
     if (ELECHOUSE_cc1101.getCC1101()) {
-      Log.notice(F("C1101 spi Connection OK" CR));
+      connected = true;
       ELECHOUSE_cc1101.Init();
       ELECHOUSE_cc1101.SetRx(RFConfig.frequency);
+      Log.notice(F("[RF][CC1101] SPI connected attempt=%d elapsed_ms=%l frequency_mhz=%F" CR),
+                 i + 1, millis() - initStarted, RFConfig.frequency);
       break;
     } else {
-      Log.error(F("C1101 spi Connection Error" CR));
+      Log.warning(F("[RF][CC1101] SPI probe failed attempt=%d/10 retry_in_ms=%d" CR), i + 1, delayMS);
       delay(delayMS);
     }
     // truncated exponential backoff
     delayMS = delayMS * 2;
     if (delayMS > delayMaxMS) delayMS = delayMaxMS;
+  }
+  if (!connected) {
+    Log.error(F("[RF][CC1101] initialization failed attempts=10 elapsed_ms=%l cs=%d gdo0=%d gdo2=%d heap=%u" CR),
+              millis() - initStarted, RF_MODULE_CS, RF_MODULE_GDO0, RF_MODULE_GDO2, ESP.getFreeHeap());
   }
 #  endif
 }

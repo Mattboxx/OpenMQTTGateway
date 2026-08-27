@@ -136,7 +136,9 @@
 #define maxRetryWatchDog          11 //maximum Wifi or MQTT re-connection attempts before restarting
 
 //set minimum quality of signal so it ignores AP's under that quality
-#define MinimumWifiSignalQuality 8
+#ifndef MinimumWifiSignalQuality
+#  define MinimumWifiSignalQuality 8
+#endif
 
 /*-------------DEFINE YOUR MQTT PARAMETERS BELOW----------------*/
 //MQTT Parameters definition
@@ -182,6 +184,48 @@
 
 #ifndef GeneralTimeOut
 #  define GeneralTimeOut 20 // time out if a task is stuck in seconds (should be more than TimeBetweenReadingRN8209/1000) and more than 3 seconds, the WDT will reset the ESP, used also for MQTT connection
+#endif
+#ifndef MQTT_RECONNECT_INTERVAL_MS
+#  define MQTT_RECONNECT_INTERVAL_MS 5000UL
+#endif
+#ifndef MQTT_KEEPALIVE_MS
+#  define MQTT_KEEPALIVE_MS 60000UL
+#endif
+#ifndef MQTT_SOCKET_TIMEOUT_MS
+#  define MQTT_SOCKET_TIMEOUT_MS 10000UL
+#endif
+#ifndef MQTT_RESTART_AFTER_FAILURES
+#  define MQTT_RESTART_AFTER_FAILURES maxRetryWatchDog
+#endif
+
+#ifdef MQTT_WOL_ENABLED
+#  ifndef MQTT_WOL_MAC
+#    define MQTT_WOL_MAC ""
+#  endif
+#  ifndef MQTT_WOL_PORT
+#    define MQTT_WOL_PORT 9
+#  endif
+#  ifndef MQTT_WOL_INITIAL_DELAY_MS
+#    define MQTT_WOL_INITIAL_DELAY_MS (60UL * 1000UL)
+#  endif
+#  ifndef MQTT_WOL_REPEAT_INTERVAL_MS
+#    define MQTT_WOL_REPEAT_INTERVAL_MS (20UL * 60UL * 1000UL)
+#  endif
+#  ifndef MQTT_WOL_MIN_FAILURES
+#    define MQTT_WOL_MIN_FAILURES 3
+#  endif
+#  ifndef MQTT_WOL_DEFAULT_ENABLED
+#    define MQTT_WOL_DEFAULT_ENABLED true
+#  endif
+#  ifndef MQTT_WOL_ON_TRANSPORT_ERROR
+#    define MQTT_WOL_ON_TRANSPORT_ERROR true
+#  endif
+#  ifndef MQTT_WOL_ON_BROKER_ERROR
+#    define MQTT_WOL_ON_BROKER_ERROR false
+#  endif
+#  ifndef MQTT_WOL_ON_AUTH_ERROR
+#    define MQTT_WOL_ON_AUTH_ERROR false
+#  endif
 #endif
 #ifndef QueueSemaphoreTimeOutTask
 #  define QueueSemaphoreTimeOutTask 3000 // time out for semaphore retrieval from a task
@@ -627,6 +671,9 @@ char mqtt_topic[parameters_size + 1] = Base_Topic;
 char gateway_name[parameters_size + 1] = Gateway_Name;
 
 void connectMQTT();
+#ifdef ZsensorGPIOInput
+void forcePublishGPIOState();
+#endif
 
 unsigned long uptime();
 bool cmpToMainTopic(const char*, const char*);

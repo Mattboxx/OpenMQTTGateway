@@ -529,6 +529,132 @@ void handleWU() {
   server.send(200, "text/html", response);
 }
 
+#if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+String generateGPIOInputPinOptions(uint8_t selectedPin) {
+  String options;
+#  if defined(ESP32)
+  const int lastPin = 39;
+#  elif defined(ESP8266)
+  const int lastPin = 16;
+#  else
+  const int lastPin = 69;
+#  endif
+  for (int pin = 0; pin <= lastPin; pin++) {
+    if (gpioInputPinValidationError(pin) != nullptr) continue;
+    options += "<option value='" + String(pin) + "'";
+    if (pin == selectedPin) options += " selected";
+    options += ">GPIO " + String(pin) + "</option>";
+  }
+  return options;
+}
+
+void handleGI() {
+  WEBUI_TRACE_LOG(F("handleGI: uri: %s, args: %d, method: %d" CR), server.uri(), server.args(), server.method());
+  WEBUI_SECURE
+
+  if (server.hasArg("save")) {
+    GPIOInputChannelConfig_s requested[GPIO_INPUT_MAX];
+    bool update = false;
+    for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+      String suffix = String(channel);
+      requested[channel].enabled = server.hasArg("ge" + suffix);
+
+      String pinText = server.arg("gp" + suffix);
+      char* parseEnd = nullptr;
+      long pin = strtol(pinText.c_str(), &parseEnd, 10);
+      if (!pinText.length() || !parseEnd || *parseEnd != '\0' || pin < 0 || pin > 255) {
+        server.send(400, "text/plain", "Invalid GPIO number for input " + String(channel + 1));
+        return;
+      }
+      const char* pinError = gpioInputPinValidationError((int)pin);
+      if (pinError) {
+        server.send(400, "text/plain", "Invalid GPIO for input " + String(channel + 1) + ": " + pinError);
+        return;
+      }
+      requested[channel].pin = (uint8_t)pin;
+
+      String requestedName = server.arg("gn" + suffix);
+      requestedName.trim();
+      if (!requestedName.length()) requestedName = channel == 0 ? "GPIOInput" : "GPIO Input " + String(channel + 1);
+      if (requestedName.length() >= GPIO_INPUT_NAME_SIZE) {
+        server.send(400, "text/plain", "Name too long for input " + String(channel + 1));
+        return;
+      }
+      strncpy(requested[channel].name, requestedName.c_str(), sizeof(requested[channel].name) - 1);
+      requested[channel].name[sizeof(requested[channel].name) - 1] = '\0';
+
+      if (requested[channel].enabled) {
+        for (uint8_t previous = 0; previous < channel; previous++) {
+          if (requested[previous].enabled && requested[previous].pin == requested[channel].pin) {
+            server.send(400, "text/plain", "GPIO " + String(pin) + " is enabled more than once");
+            return;
+          }
+        }
+      }
+
+      if (requested[channel].enabled != gpioInputChannels[channel].enabled ||
+          requested[channel].pin != gpioInputChannels[channel].pin ||
+          strcmp(requested[channel].name, gpioInputChannels[channel].name) != 0) {
+        update = true;
+      }
+    }
+
+    if (update) {
+      for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+        gpioInputChannels[channel] = requested[channel];
+        Log.notice(F("[WebUI][GPIO] saving channel=%u enabled=%T name=%s pin=%u" CR),
+                   channel + 1, gpioInputChannels[channel].enabled,
+                   gpioInputChannels[channel].name, gpioInputChannels[channel].pin);
+      }
+#  ifndef ESPWifiManualSetup
+      saveConfig();
+#  endif
+
+      char jsonChar[100];
+      serializeJson(modules, jsonChar, measureJson(modules) + 1);
+      char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
+      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save GPIO inputs").c_str());
+      String response = String(buffer) + String(script) + String(style) + String(restart_script);
+      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "GPIO input configuration saved");
+      response += String(buffer);
+      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
+      response += String(buffer);
+      server.send(200, "text/html", response);
+      delay(2000);
+      ESPRestart(7);
+      return;
+    }
+    Log.notice(F("[WebUI][GPIO] no configuration changes" CR));
+  }
+
+  char jsonChar[100];
+  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure GPIO inputs").c_str());
+  String response = String(buffer) + String(script) + String(style);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, body_header, jsonChar, gateway_name);
+  response += String(buffer);
+  response += "<fieldset class='set1'><legend><span><b>GPIO input sensors</b></span></legend>";
+  response += "<form method='post' action='gi'><p>Enable up to " + String(GPIO_INPUT_MAX) +
+              " independent contact sensors. The primary input keeps the existing MQTT and Home Assistant identity.</p>";
+  for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+    String suffix = String(channel);
+    response += "<hr><p><b>Input " + String(channel + 1) + (channel == 0 ? " (primary)" : "") + "</b></p>";
+    response += "<p><label><input type='checkbox' name='ge" + suffix + "'" +
+                (gpioInputChannels[channel].enabled ? " checked" : "") + ">Enabled</label></p>";
+    response += "<p><b>Name</b><br><input name='gn" + suffix + "' maxlength='" + String(GPIO_INPUT_NAME_SIZE - 1) +
+                "' value='" + HtmlEscape(String(gpioInputChannels[channel].name)) + "'></p>";
+    response += "<p><b>Pin</b><br><select name='gp" + suffix + "'>" +
+                generateGPIOInputPinOptions(gpioInputChannels[channel].pin) + "</select></p>";
+  }
+  response += "<br><button name='save' type='submit' class='button bgrn'>Save and restart</button></form></fieldset>";
+  response += String(body_footer_config_menu);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
+  response += String(buffer);
+  server.send(200, "text/html", response);
+}
+#endif
+
 /**
  * @brief /WI - Configure WiFi Page
  * T: handleWI: uri: /wi, args: 4, method: 1
@@ -542,7 +668,8 @@ void handleWI() {
   String WiFiScan = "";
   if (server.args()) {
     for (uint8_t i = 0; i < server.args(); i++) {
-      WEBUI_TRACE_LOG(F("handleWI Arg: %d, %s=%s" CR), i, server.argName(i).c_str(), server.arg(i).c_str());
+      WEBUI_TRACE_LOG(F("handleWI Arg: %d, %s=%s" CR), i, server.argName(i).c_str(),
+                      server.argName(i) == "p1" ? "[redacted]" : server.arg(i).c_str());
     }
     if (server.hasArg("scan")) {
       bool limitScannedNetworks = true;
@@ -700,12 +827,14 @@ void handleMQ() {
   WEBUI_SECURE
   if (server.args()) {
     for (uint8_t i = 0; i < server.args(); i++) {
-      WEBUI_TRACE_LOG(F("handleMQ Arg: %d, %s=%s" CR), i, server.argName(i).c_str(), server.arg(i).c_str());
+      WEBUI_TRACE_LOG(F("handleMQ Arg: %d, %s=%s" CR), i, server.argName(i).c_str(),
+                      server.argName(i) == "mp" ? "[redacted]" : server.arg(i).c_str());
     }
     if (server.hasArg("save")) {
       StaticJsonDocument<JSON_MSG_BUFFER> WEBtoSYSBuffer;
       JsonObject WEBtoSYS = WEBtoSYSBuffer.to<JsonObject>();
       bool update = false;
+      bool mqttConnectionUpdate = false;
 
 #  if !MQTT_BROKER_MODE
       if (server.hasArg("mh")) {
@@ -729,7 +858,8 @@ void handleMQ() {
         }
       }
 
-      if (server.hasArg("mp")) {
+      // An empty password means "keep the saved password".
+      if (server.hasArg("mp") && server.arg("mp").length() > 0) {
         WEBtoSYS["mqtt_pass"] = server.arg("mp");
         if (strncmp(cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_pass, server.arg("mp").c_str(), parameters_size)) {
           update = true;
@@ -741,6 +871,8 @@ void handleMQ() {
         update = true;
       }
       WEBtoSYS["mqtt_secure"] = server.hasArg("sc");
+
+      mqttConnectionUpdate = update;
 
       if (!update) {
         Log.warning(F("[WebUI] clearing" CR));
@@ -754,6 +886,7 @@ void handleMQ() {
         WEBtoSYS["gateway_name"] = server.arg("h");
         if (strncmp(gateway_name, server.arg("h").c_str(), parameters_size)) {
           update = true;
+          mqttConnectionUpdate = true;
         }
       }
 
@@ -761,6 +894,7 @@ void handleMQ() {
         WEBtoSYS["mqtt_topic"] = server.arg("mt");
         if (strncmp(mqtt_topic, server.arg("mt").c_str(), parameters_size)) {
           update = true;
+          mqttConnectionUpdate = true;
         }
       }
 #  ifdef ZmqttDiscovery
@@ -768,25 +902,70 @@ void handleMQ() {
         WEBtoSYS["discovery_prefix"] = server.arg("dp");
         if (strncmp(discovery_prefix, server.arg("dp").c_str(), parameters_size)) {
           update = true;
+          mqttConnectionUpdate = true;
         }
+      }
+#  endif
+
+#  if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+      bool requestedWOLEnabled = server.hasArg("we");
+      bool requestedWOLTransport = server.hasArg("wt");
+      bool requestedWOLBroker = server.hasArg("wb");
+      bool requestedWOLAuth = server.hasArg("wa");
+      String requestedWOLMac = server.hasArg("wm") ? server.arg("wm") : String(mqttWOLConfig.mac);
+      requestedWOLMac.trim();
+      byte parsedWOLMac[6];
+      if ((requestedWOLEnabled || requestedWOLMac.length()) && !mqttWOLParseMAC(requestedWOLMac.c_str(), parsedWOLMac)) {
+        server.send(400, "text/plain", "Invalid Wake-on-LAN MAC address");
+        return;
+      }
+
+      unsigned long requestedWOLDelaySeconds = server.hasArg("wd") ? strtoul(server.arg("wd").c_str(), nullptr, 10) : mqttWOLConfig.initialDelayMs / 1000UL;
+      unsigned long requestedWOLRepeatSeconds = server.hasArg("wr") ? strtoul(server.arg("wr").c_str(), nullptr, 10) : mqttWOLConfig.repeatIntervalMs / 1000UL;
+      unsigned long requestedWOLFailures = server.hasArg("wf") ? strtoul(server.arg("wf").c_str(), nullptr, 10) : mqttWOLConfig.minFailures;
+      if (requestedWOLDelaySeconds > 86400UL) requestedWOLDelaySeconds = 86400UL;
+      if (requestedWOLRepeatSeconds > 86400UL) requestedWOLRepeatSeconds = 86400UL;
+      if (requestedWOLFailures < 1UL) requestedWOLFailures = 1UL;
+      if (requestedWOLFailures > 1000UL) requestedWOLFailures = 1000UL;
+
+      WEBtoSYS["mqtt_wol_enabled"] = requestedWOLEnabled;
+      WEBtoSYS["mqtt_wol_mac"] = requestedWOLMac;
+      WEBtoSYS["mqtt_wol_delay_s"] = requestedWOLDelaySeconds;
+      WEBtoSYS["mqtt_wol_failures"] = requestedWOLFailures;
+      WEBtoSYS["mqtt_wol_repeat_s"] = requestedWOLRepeatSeconds;
+      WEBtoSYS["mqtt_wol_transport"] = requestedWOLTransport;
+      WEBtoSYS["mqtt_wol_broker"] = requestedWOLBroker;
+      WEBtoSYS["mqtt_wol_auth"] = requestedWOLAuth;
+
+      if (mqttWOLConfig.enabled != requestedWOLEnabled || strcmp(mqttWOLConfig.mac, requestedWOLMac.c_str()) != 0 ||
+          mqttWOLConfig.initialDelayMs != requestedWOLDelaySeconds * 1000UL || mqttWOLConfig.minFailures != requestedWOLFailures ||
+          mqttWOLConfig.repeatIntervalMs != requestedWOLRepeatSeconds * 1000UL || mqttWOLConfig.onTransportError != requestedWOLTransport ||
+          mqttWOLConfig.onBrokerError != requestedWOLBroker || mqttWOLConfig.onAuthError != requestedWOLAuth) {
+        update = true;
       }
 #  endif
 
 #  ifndef ESPWifiManualSetup
       if (update) {
-        Log.warning(F("[WebUI] Save MQTT and Reconnect" CR));
-        WEBtoSYS["cnt_index"] = CNT_DEFAULT_INDEX;
-        WEBtoSYS["save_cnt"] = true;
+        Log.notice(F("[WebUI] Saving MQTT/WOL configuration" CR));
+        if (mqttConnectionUpdate) {
+          WEBtoSYS["cnt_index"] = CNT_DEFAULT_INDEX;
+          WEBtoSYS["save_cnt"] = true;
+        }
         char jsonChar[100];
         serializeJson(modules, jsonChar, measureJson(modules) + 1);
         char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
-        snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save MQTT and Reconnect").c_str());
+        snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save configuration").c_str());
         String response = String(buffer);
-        response += String(restart_script);
+        if (mqttConnectionUpdate) response += String(restart_script);
         response += String(script);
         response += String(style);
-        snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "Save MQTT and Reconnect");
+        if (mqttConnectionUpdate) {
+          snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "MQTT configuration saved");
+        } else {
+          snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_saved_body, jsonChar, gateway_name, "Wake-on-LAN configuration saved");
+        }
         response += String(buffer);
         snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
         response += String(buffer);
@@ -812,18 +991,51 @@ void handleMQ() {
   String response = String(buffer);
   response += String(script);
   response += String(style);
+  String gatewayNameEscaped = HtmlEscape(String(gateway_name));
+  String mqttTopicEscaped = HtmlEscape(String(mqtt_topic));
   // mqtt server (mh), mqtt port (ml), mqtt username (mu), mqtt password (mp), secure connection (sc), server certificate (msc), mqtt topic (mt), discovery prefix (dp) (last one only #ifdef ZmqttDiscovery)
 #  if MQTT_BROKER_MODE
 #    ifdef ZmqttDiscovery
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, "", "1883", "", "", gateway_name, mqtt_topic, discovery_prefix);
+  String discoveryPrefixEscaped = HtmlEscape(String(discovery_prefix));
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, "", "1883", "", "", gatewayNameEscaped.c_str(), mqttTopicEscaped.c_str(), discoveryPrefixEscaped.c_str());
 #    else
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, "", "1883", "", "", gateway_name, mqtt_topic);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, "", "1883", "", "", gatewayNameEscaped.c_str(), mqttTopicEscaped.c_str());
 #    endif
 #  else
+  String mqttServerEscaped = HtmlEscape(String(cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_server));
+  String mqttUserEscaped = HtmlEscape(String(cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_user));
 #    ifdef ZmqttDiscovery
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_server, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_user, (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gateway_name, mqtt_topic, discovery_prefix);
+  String discoveryPrefixEscaped = HtmlEscape(String(discovery_prefix));
+#      ifdef MQTT_WOL_ENABLED
+  String mqttWOLMacEscaped = HtmlEscape(String(mqttWOLConfig.mac));
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name,
+           mqttServerEscaped.c_str(), cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, mqttUserEscaped.c_str(),
+           (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gatewayNameEscaped.c_str(),
+           mqttTopicEscaped.c_str(), discoveryPrefixEscaped.c_str(), (mqttWOLConfig.enabled ? "checked" : ""),
+           mqttWOLMacEscaped.c_str(), mqttWOLConfig.initialDelayMs / 1000UL, mqttWOLConfig.minFailures,
+           mqttWOLConfig.repeatIntervalMs / 1000UL, (mqttWOLConfig.onTransportError ? "checked" : ""),
+           (mqttWOLConfig.onBrokerError ? "checked" : ""), (mqttWOLConfig.onAuthError ? "checked" : ""));
+#      else
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, mqttServerEscaped.c_str(),
+           cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, mqttUserEscaped.c_str(),
+           (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gatewayNameEscaped.c_str(),
+           mqttTopicEscaped.c_str(), discoveryPrefixEscaped.c_str());
+#      endif
 #    else
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_server, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_user, (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gateway_name, mqtt_topic);
+#      ifdef MQTT_WOL_ENABLED
+  String mqttWOLMacEscaped = HtmlEscape(String(mqttWOLConfig.mac));
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name,
+           mqttServerEscaped.c_str(), cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, mqttUserEscaped.c_str(),
+           (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gatewayNameEscaped.c_str(),
+           mqttTopicEscaped.c_str(), (mqttWOLConfig.enabled ? "checked" : ""), mqttWOLMacEscaped.c_str(),
+           mqttWOLConfig.initialDelayMs / 1000UL, mqttWOLConfig.minFailures, mqttWOLConfig.repeatIntervalMs / 1000UL,
+           (mqttWOLConfig.onTransportError ? "checked" : ""), (mqttWOLConfig.onBrokerError ? "checked" : ""),
+           (mqttWOLConfig.onAuthError ? "checked" : ""));
+#      else
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, config_mqtt_body, jsonChar, gateway_name, mqttServerEscaped.c_str(),
+           cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, mqttUserEscaped.c_str(),
+           (cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "checked" : ""), gatewayNameEscaped.c_str(), mqttTopicEscaped.c_str());
+#      endif
 #    endif
 #  endif
   response += String(buffer);
@@ -849,12 +1061,14 @@ void handleCG() {
 
   if (server.args()) {
     for (uint8_t i = 0; i < server.args(); i++) {
-      WEBUI_TRACE_LOG(F("handleCG Arg: %d, %s=%s" CR), i, server.argName(i).c_str(), server.arg(i).c_str());
+      WEBUI_TRACE_LOG(F("handleCG Arg: %d, %s=%s" CR), i, server.argName(i).c_str(),
+                      server.argName(i) == "gp" ? "[redacted]" : server.arg(i).c_str());
     }
     if (server.hasArg("save") && server.hasArg("gp") && strcmp(ota_pass, server.arg("gp").c_str())) {
-      strncpy(ota_pass, server.arg("gp").c_str(), parameters_size);
-      WEBtoSYS["gw_pass"] = ota_pass;
-      update = true;
+      if (copyConfigString(ota_pass, sizeof(ota_pass), server.arg("gp").c_str(), "gw_pass")) {
+        WEBtoSYS["gw_pass"] = ota_pass;
+        update = true;
+      }
     }
   }
 
@@ -1642,6 +1856,9 @@ void WebUISetup() {
   server.on("/cg", HTTP_POST, handleCG); // Configure gateway"
 #  endif
   server.on("/wu", handleWU); // Configure WebUI
+#  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+  server.on("/gi", handleGI); // Configure GPIO input sensors
+#  endif
 #  ifdef ZgatewayLORA
   server.on("/la", handleLA); // Configure LORA
 #  elif defined(ZgatewayRTL_433) || defined(ZgatewayPilight) || defined(ZgatewayRF) || defined(ZgatewayRF2) || defined(ZactuatorSomfy)

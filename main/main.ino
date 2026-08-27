@@ -87,6 +87,9 @@ bool ready_to_sleep = false;
 #include <ArduinoJson.h>
 #include <ArduinoLog.h>
 #include <PicoMQTT.h>
+#ifdef MQTT_WOL_ENABLED
+#  include <WiFiUdp.h>
+#endif
 
 #include <memory>
 
@@ -250,6 +253,29 @@ char ota_hostname[MAC_NAME_MAX_LEN];
 int failure_number_ntwk = 0; // number of failure connecting to network
 int failure_number_mqtt = 0; // number of failure connecting to MQTT
 
+#ifdef MQTT_WOL_ENABLED
+struct MQTTWOLConfig_s {
+  bool enabled;
+  char mac[18];
+  unsigned long initialDelayMs;
+  unsigned int minFailures;
+  unsigned long repeatIntervalMs;
+  bool onTransportError;
+  bool onBrokerError;
+  bool onAuthError;
+};
+
+MQTTWOLConfig_s mqttWOLConfig = {
+    MQTT_WOL_DEFAULT_ENABLED,
+    MQTT_WOL_MAC,
+    MQTT_WOL_INITIAL_DELAY_MS,
+    MQTT_WOL_MIN_FAILURES,
+    MQTT_WOL_REPEAT_INTERVAL_MS,
+    MQTT_WOL_ON_TRANSPORT_ERROR,
+    MQTT_WOL_ON_BROKER_ERROR,
+    MQTT_WOL_ON_AUTH_ERROR};
+#endif
+
 static unsigned long last_ota_activity_millis = 0;
 // Global struct to store live SYS configuration data
 SYSConfig_s SYSConfig;
@@ -263,6 +289,7 @@ static int cnt_index = CNT_DEFAULT_INDEX;
 #  include <ArduinoOTA.h>
 #  include <FS.h>
 #  include <SPIFFS.h>
+#  include <esp_system.h>
 #  include <esp_task_wdt.h>
 #  include <nvs.h>
 #  include <nvs_flash.h>
@@ -364,6 +391,78 @@ protected:
 std::unique_ptr<MQTTServer> mqtt;
 #else
 std::unique_ptr< ::Client> eClient;
+
+#  ifdef MQTT_WOL_ENABLED
+static PicoMQTT::ConnectReturnCode mqttLastConnectReturnCode = PicoMQTT::CRC_UNDEFINED;
+
+static const char* mqttConnectReturnCodeName(PicoMQTT::ConnectReturnCode code) {
+  switch (code) {
+    case PicoMQTT::CRC_ACCEPTED:
+      return "accepted";
+    case PicoMQTT::CRC_UNACCEPTABLE_PROTOCOL_VERSION:
+      return "protocol-version-rejected";
+    case PicoMQTT::CRC_IDENTIFIER_REJECTED:
+      return "client-id-rejected";
+    case PicoMQTT::CRC_SERVER_UNAVAILABLE:
+      return "broker-unavailable";
+    case PicoMQTT::CRC_BAD_USERNAME_OR_PASSWORD:
+      return "bad-username-or-password";
+    case PicoMQTT::CRC_NOT_AUTHORIZED:
+      return "not-authorized";
+    case PicoMQTT::CRC_UNDEFINED:
+    default:
+      return "transport-tls-or-no-connack";
+  }
+}
+
+// PicoMQTT 1.1.1 does not expose the CONNACK return code used by its
+// automatic reconnect loop. Keep the upstream behaviour while retaining
+// that code so WOL can distinguish transport, broker and authentication
+// failures without making a second connection attempt.
+class OMGMQTTClient : public PicoMQTT::Client {
+public:
+  using PicoMQTT::Client::Client;
+
+  void loop() override {
+    if (!client.connected()) {
+      if (host.isEmpty() || !port) return;
+      if (millis() - last_reconnect_attempt < reconnect_interval_millis) return;
+
+      const unsigned long attemptStarted = millis();
+      Log.trace(F("[MQTT] connect attempt host=%s port=%u client_id=%s auth=%T heap=%u" CR),
+                host.c_str(), port, client_id.c_str(), !username.isEmpty(), ESP.getFreeHeap());
+      mqttLastConnectReturnCode = PicoMQTT::CRC_UNDEFINED;
+      const bool connectionEstablished = connect(
+          host.c_str(), port,
+          client_id.isEmpty() ? "" : client_id.c_str(),
+          username.isEmpty() ? nullptr : username.c_str(),
+          password.isEmpty() ? nullptr : password.c_str(),
+          will.topic.isEmpty() ? nullptr : will.topic.c_str(),
+          will.payload.isEmpty() ? nullptr : will.payload.c_str(),
+          will.payload.isEmpty() ? 0 : will.payload.length(),
+          will.qos, will.retain, true, &mqttLastConnectReturnCode);
+
+      last_reconnect_attempt = millis();
+
+      Log.trace(F("[MQTT] connect result success=%T code=%u reason=%s elapsed_ms=%l" CR),
+                connectionEstablished, (unsigned int)mqttLastConnectReturnCode,
+                mqttConnectReturnCodeName(mqttLastConnectReturnCode), millis() - attemptStarted);
+
+      if (!connectionEstablished) {
+        if (connection_failure_callback) connection_failure_callback();
+        return;
+      }
+
+      for (const auto& subscription : subscriptions) {
+        BasicClient::subscribe(subscription.first.c_str());
+      }
+      on_connect();
+    }
+
+    BasicClient::loop();
+  }
+};
+#  endif
 std::unique_ptr<PicoMQTT::Client> mqtt;
 #endif
 
@@ -427,7 +526,11 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
     return true;
   }
   if (queueLength >= QueueSize) {
-    Log.warning(F("%d Doc(s) in queue, doc blocked" CR), queueLength);
+    const char* origin = jsonDoc["origin"];
+    if (!origin) origin = jsonDoc["topic"];
+    if (!origin) origin = "unknown";
+    Log.warning(F("[QUEUE] full current=%d capacity=%d blocked_total=%l received_total=%l origin=%s heap=%u" CR),
+                queueLength, QueueSize, blockedMessages + 1, receivedMessages, origin, ESP.getFreeHeap());
     blockedMessages++;
     return false;
   }
@@ -437,7 +540,8 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
 #ifdef ESP32
   // Semaphore check before enqueueing a document
   if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(timeout)) == pdFALSE) {
-    Log.error(F("xQueueMutex not taken" CR));
+    Log.error(F("[QUEUE] mutex timeout timeout_ms=%d current=%d blocked_total=%l heap=%u" CR),
+              timeout, queueLength, blockedMessages + 1, ESP.getFreeHeap());
     gatewayState = GatewayState::ERROR;
     blockedMessages++;
     return false;
@@ -521,6 +625,10 @@ void emptyQueue() {
   queueLength = jsonQueue.size();
   if (queueLength > maxQueueLength) {
     maxQueueLength = queueLength;
+    if (maxQueueLength >= (QueueSize * 3) / 4) {
+      Log.warning(F("[QUEUE] high-water current=%d capacity=%d processed=%l blocked=%l heap=%u" CR),
+                  maxQueueLength, QueueSize, queueLengthSum, blockedMessages, ESP.getFreeHeap());
+    }
   }
   if (queueLength <= 0) {
     return;
@@ -528,20 +636,24 @@ void emptyQueue() {
   Log.trace(F("Dequeue JSON" CR));
   DynamicJsonDocument jsonBuffer(JSON_MSG_BUFFER_MAX);
   JsonObject obj = jsonBuffer.to<JsonObject>();
+  size_t queuedPayloadBytes = 0;
 #ifdef ESP32
   if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(QueueSemaphoreTimeOutTask)) == pdFALSE) {
-    Log.error(F("xQueueMutex not taken" CR));
+    Log.error(F("[QUEUE] dequeue mutex timeout timeout_ms=%d current=%d heap=%u" CR),
+              QueueSemaphoreTimeOutTask, queueLength, ESP.getFreeHeap());
     gatewayState = GatewayState::ERROR;
     return;
   }
 #endif
+  queuedPayloadBytes = jsonQueue.front().size();
   auto error = deserializeJson(jsonBuffer, jsonQueue.front());
   jsonQueue.pop();
 #ifdef ESP32
   xSemaphoreGive(xQueueMutex);
 #endif
   if (error) {
-    Log.error(F("deserialize jsonQueue.front() failed: %s, buffer capacity: %u" CR), error.c_str(), jsonBuffer.capacity());
+    Log.error(F("[QUEUE] deserialize failed error=%s payload_bytes=%u buffer_capacity=%u heap=%u" CR),
+              error.c_str(), queuedPayloadBytes, jsonBuffer.capacity(), ESP.getFreeHeap());
     gatewayState = GatewayState::ERROR;
   } else {
     if (jsonDispatch(obj))
@@ -928,6 +1040,133 @@ std::pair<String, uint16_t> discoverMQTTbroker() {
 }
 #endif
 
+#if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+static bool mqttWOLTrackingDisconnect = false;
+static unsigned long mqttWOLDisconnectedSince = 0;
+static unsigned long mqttWOLLastAttempt = 0;
+static bool mqttWOLWakeSent = false;
+
+static int mqttWOLHexValue(char value) {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+static bool mqttWOLParseMAC(const char* text, byte* mac) {
+  if (!text || !mac) return false;
+  for (byte index = 0; index < 6; index++) {
+    int high = mqttWOLHexValue(*text++);
+    int low = mqttWOLHexValue(*text++);
+    if (high < 0 || low < 0) return false;
+    mac[index] = (high << 4) | low;
+    if (index < 5 && *text++ != ':') return false;
+  }
+  return *text == '\0';
+}
+
+static bool mqttWOLSend() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Log.warning(F("[WOL] packet skipped: WiFi unavailable status=%d failures=%d" CR),
+                WiFi.status(), failure_number_mqtt);
+    return false;
+  }
+
+  byte mac[6];
+  if (!mqttWOLParseMAC(mqttWOLConfig.mac, mac)) {
+    Log.error(F("[WOL] invalid destination MAC=%s" CR), mqttWOLConfig.mac);
+    return false;
+  }
+
+  byte packet[102];
+  memset(packet, 0xFF, 6);
+  for (byte index = 0; index < 16; index++) {
+    memcpy(packet + 6 + (index * 6), mac, sizeof(mac));
+  }
+
+  WiFiUDP udp;
+  if (!udp.beginPacket(IPAddress(255, 255, 255, 255), MQTT_WOL_PORT)) {
+    Log.warning(F("[WOL] UDP begin failed destination=%s broadcast=255.255.255.255 port=%u" CR),
+                mqttWOLConfig.mac, MQTT_WOL_PORT);
+    return false;
+  }
+  udp.write(packet, sizeof(packet));
+  bool sent = udp.endPacket() == 1;
+  udp.stop();
+  Log.notice(F("[WOL] magic packet result=%s destination=%s broadcast=255.255.255.255 port=%u bytes=%u failures=%d outage_ms=%l" CR),
+             sent ? "sent" : "failed", mqttWOLConfig.mac, MQTT_WOL_PORT, sizeof(packet), failure_number_mqtt,
+             mqttWOLTrackingDisconnect ? millis() - mqttWOLDisconnectedSince : 0UL);
+  return sent;
+}
+
+static void mqttWOLConnected() {
+  if (mqttWOLTrackingDisconnect) {
+    Log.notice(F("[WOL] outage tracking cleared duration_ms=%l wake_sent=%T" CR),
+               millis() - mqttWOLDisconnectedSince, mqttWOLWakeSent);
+  }
+  mqttWOLTrackingDisconnect = false;
+  mqttWOLDisconnectedSince = 0;
+  mqttWOLLastAttempt = 0;
+  mqttWOLWakeSent = false;
+}
+
+static bool mqttWOLShouldTrigger(PicoMQTT::ConnectReturnCode returnCode) {
+  if (returnCode == PicoMQTT::CRC_UNDEFINED) return mqttWOLConfig.onTransportError;
+  if (returnCode >= PicoMQTT::CRC_UNACCEPTABLE_PROTOCOL_VERSION &&
+      returnCode <= PicoMQTT::CRC_SERVER_UNAVAILABLE)
+    return mqttWOLConfig.onBrokerError;
+  if (returnCode == PicoMQTT::CRC_BAD_USERNAME_OR_PASSWORD ||
+      returnCode == PicoMQTT::CRC_NOT_AUTHORIZED)
+    return mqttWOLConfig.onAuthError;
+  return false;
+}
+
+static void mqttWOLDisconnected(PicoMQTT::ConnectReturnCode returnCode) {
+  if (mqtt && mqtt->connected()) {
+    mqttWOLConnected();
+    return;
+  }
+
+  byte configuredMac[6];
+  if (!mqttWOLConfig.enabled || !mqttWOLShouldTrigger(returnCode) ||
+      !mqttWOLParseMAC(mqttWOLConfig.mac, configuredMac)) {
+    if (mqttWOLConfig.enabled && !mqttWOLParseMAC(mqttWOLConfig.mac, configuredMac)) {
+      Log.error(F("[WOL] trigger disabled by invalid destination MAC=%s" CR), mqttWOLConfig.mac);
+    }
+    mqttWOLConnected();
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!mqttWOLTrackingDisconnect) {
+    mqttWOLTrackingDisconnect = true;
+    mqttWOLDisconnectedSince = now;
+    Log.notice(F("[WOL] outage tracking started cause=%s code=%u target=%s min_failures=%u delay_ms=%l repeat_ms=%l" CR),
+               mqttConnectReturnCodeName(returnCode), (unsigned int)returnCode, mqttWOLConfig.mac,
+               mqttWOLConfig.minFailures, mqttWOLConfig.initialDelayMs, mqttWOLConfig.repeatIntervalMs);
+    return;
+  }
+
+  if (failure_number_mqtt < mqttWOLConfig.minFailures) {
+    Log.trace(F("[WOL] waiting for failure threshold current=%d required=%u" CR),
+              failure_number_mqtt, mqttWOLConfig.minFailures);
+    return;
+  }
+  if ((unsigned long)(now - mqttWOLDisconnectedSince) < mqttWOLConfig.initialDelayMs) {
+    Log.trace(F("[WOL] waiting for initial delay elapsed_ms=%l required_ms=%l" CR),
+              now - mqttWOLDisconnectedSince, mqttWOLConfig.initialDelayMs);
+    return;
+  }
+  if (mqttWOLLastAttempt &&
+      (mqttWOLConfig.repeatIntervalMs == 0 ||
+       (unsigned long)(now - mqttWOLLastAttempt) < mqttWOLConfig.repeatIntervalMs))
+    return;
+
+  mqttWOLLastAttempt = now;
+  mqttWOLWakeSent = mqttWOLSend() || mqttWOLWakeSent;
+}
+#endif
+
 #if MQTT_BROKER_MODE
 void setupMQTT() {
   Log.notice(F("Reconfiguring MQTT broker..." CR));
@@ -980,15 +1219,27 @@ void setupMQTT() {
   const auto broker_port = String(parameters.mqtt_port).toInt();
 #  endif
 
-  Log.trace(F("Mqtt server: %s" CR), broker_host);
-  Log.trace(F("Port: %u" CR), broker_port);
+  String mqttClientId = gateway_name;
+#  if defined(MQTT_CLIENT_ID_APPEND_MAC) && MQTT_CLIENT_ID_APPEND_MAC && (defined(ESP8266) || defined(ESP32))
+  String clientMac = WiFi.macAddress();
+  clientMac.replace(":", "");
+  if (clientMac.length() >= 6) mqttClientId += "_" + clientMac.substring(clientMac.length() - 6);
+#  endif
 
-  mqtt.reset(new PicoMQTT::Client(*eClient, broker_host, broker_port, gateway_name,
+  Log.notice(F("[MQTT] configured profile=%d host=%s port=%u client_id=%s secure=%T cert_validation=%T auth=%T reconnect_ms=%l keepalive_ms=%l socket_timeout_ms=%l" CR),
+             cnt_index, broker_host, broker_port, mqttClientId.c_str(), parameters.isConnectionSecure,
+             parameters.isCertValidate, strlen(parameters.mqtt_user) > 0, (unsigned long)MQTT_RECONNECT_INTERVAL_MS,
+             (unsigned long)MQTT_KEEPALIVE_MS, (unsigned long)MQTT_SOCKET_TIMEOUT_MS);
+
+#  ifdef MQTT_WOL_ENABLED
+  mqtt.reset(new OMGMQTTClient(*eClient, broker_host, broker_port, mqttClientId.c_str(),
+#  else
+  mqtt.reset(new PicoMQTT::Client(*eClient, broker_host, broker_port, mqttClientId.c_str(),
+#  endif
                                   parameters.mqtt_user, parameters.mqtt_pass,
-                                  0, // minimum reconnect attempt interval [ms]
-                                  60 * 1000, // keep alive interval [ms]
-                                  (GeneralTimeOut - 1) * 1000 // socket timeout [ms]
-                                  ));
+                                  MQTT_RECONNECT_INTERVAL_MS,
+                                  MQTT_KEEPALIVE_MS,
+                                  MQTT_SOCKET_TIMEOUT_MS));
 
 #  if AWS_IOT
   // AWS doesn't support will topic for the moment
@@ -1004,6 +1255,7 @@ void setupMQTT() {
 #  endif
 
   mqtt->connected_callback = [] {
+    const int failuresBeforeConnect = failure_number_mqtt;
 #  if AWS_IOT
     {
       // Define a threshold for instability detection
@@ -1034,9 +1286,17 @@ void setupMQTT() {
 #  endif
     ProcessLock = false; // Release the loop process
     displayPrint("MQTT connected");
-    Log.notice(F("Connected to broker" CR));
+    Log.notice(F("[MQTT] connected profile=%d previous_failures=%d uptime_ms=%l wifi_rssi=%d wifi_channel=%d ip=%s heap=%u" CR),
+               cnt_index, failuresBeforeConnect, millis(), WiFi.RSSI(), WiFi.channel(),
+               WiFi.localIP().toString().c_str(), ESP.getFreeHeap());
     gatewayState = GatewayState::BROKER_CONNECTED;
     failure_number_mqtt = 0;
+#  ifdef MQTT_WOL_ENABLED
+    mqttWOLConnected();
+#  endif
+#  ifdef ZsensorGPIOInput
+    forcePublishGPIOState();
+#  endif
     // Once connected, publish an announcement...
     pub(will_Topic, Gateway_AnnouncementMsg, will_Retain);
 
@@ -1064,14 +1324,24 @@ void setupMQTT() {
     }
     failure_number_mqtt++; // we count the failure
     gatewayState = GatewayState::BROKER_DISCONNECTED;
-    Log.warning(F("failure_number_mqtt: %d" CR), failure_number_mqtt);
+#  ifdef MQTT_WOL_ENABLED
+    Log.warning(F("[MQTT] connection failed profile=%d failure=%d code=%u reason=%s wifi_status=%d rssi=%d heap=%u uptime_ms=%l" CR),
+                cnt_index, failure_number_mqtt, (unsigned int)mqttLastConnectReturnCode,
+                mqttConnectReturnCodeName(mqttLastConnectReturnCode), WiFi.status(), WiFi.RSSI(),
+                ESP.getFreeHeap(), millis());
+    mqttWOLDisconnected(mqttLastConnectReturnCode);
+#  else
+    Log.warning(F("[MQTT] connection failed profile=%d failure=%d wifi_status=%d rssi=%d heap=%u uptime_ms=%l" CR),
+                cnt_index, failure_number_mqtt, WiFi.status(), WiFi.RSSI(), ESP.getFreeHeap(), millis());
+#  endif
 
     const auto& parameters = cnt_parameters_array[cnt_index];
 
     if (parameters.isConnectionSecure) {
       WiFiClientSecure* client = static_cast<WiFiClientSecure*>(eClient.get());
 #  if defined(ESP32)
-      Log.warning(F("failed, ssl error code=%d" CR), client->lastError(nullptr, 0));
+      Log.warning(F("[MQTT] TLS socket error=%d profile=%d cert_validation=%T" CR),
+                  client->lastError(nullptr, 0), cnt_index, parameters.isCertValidate);
 #  elif defined(ESP8266)
       Log.warning(F("failed, ssl error code=%d" CR), client->getLastSSLError());
 #  endif
@@ -1089,9 +1359,8 @@ void setupMQTT() {
       return;
     }
 
-    delayWithOTA(10000);
-
-    if (failure_number_mqtt > maxRetryWatchDog) {
+#  if MQTT_RESTART_AFTER_FAILURES > 0
+    if (failure_number_mqtt > MQTT_RESTART_AFTER_FAILURES) {
 #  ifndef ESPWifiManualSetup
       // Look for the next valid connection
       for (int i = 0; i < cnt_parameters_array_size; i++) {
@@ -1123,6 +1392,22 @@ void setupMQTT() {
       }
       ESPRestart(1);
     }
+#  endif
+  };
+
+  mqtt->disconnected_callback = [] {
+    if (!SYSConfig.offline) gatewayState = GatewayState::BROKER_DISCONNECTED;
+#  ifdef MQTT_WOL_ENABLED
+    if (mqttLastConnectReturnCode == PicoMQTT::CRC_ACCEPTED)
+      mqttLastConnectReturnCode = PicoMQTT::CRC_UNDEFINED;
+    Log.warning(F("[MQTT] disconnected code=%u reason=%s wifi_status=%d rssi=%d heap=%u uptime_ms=%l" CR),
+                (unsigned int)mqttLastConnectReturnCode, mqttConnectReturnCodeName(mqttLastConnectReturnCode),
+                WiFi.status(), WiFi.RSSI(), ESP.getFreeHeap(), millis());
+    mqttWOLDisconnected(mqttLastConnectReturnCode);
+#  else
+    Log.warning(F("[MQTT] disconnected wifi_status=%d rssi=%d heap=%u uptime_ms=%l" CR),
+                WiFi.status(), WiFi.RSSI(), ESP.getFreeHeap(), millis());
+#  endif
   };
 
   mqtt->subscribe(String(mqtt_topic) + gateway_name + subjectMQTTtoX, receivingDATA, mqtt_max_payload_size);
@@ -1320,6 +1605,11 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Log.begin(LOG_LEVEL, &Serial);
   Log.notice(F(CR "************* WELCOME TO OpenMQTTGateway **************" CR));
+#ifdef ESP32
+  Log.notice(F("[BOOT] version=" OMG_VERSION " env=" ENV_NAME " reset_reason=%d cpu_mhz=%u sdk=%s heap=%u min_heap=%u flash=%u sketch=%u free_sketch=%u" CR),
+             (int)esp_reset_reason(), ESP.getCpuFreqMHz(), ESP.getSdkVersion(), ESP.getFreeHeap(),
+             ESP.getMinFreeHeap(), ESP.getFlashChipSize(), ESP.getSketchSize(), ESP.getFreeSketchSpace());
+#endif
 #if defined(TRIGGER_GPIO) && !defined(ESPWifiManualSetup)
   pinMode(TRIGGER_GPIO, INPUT_PULLUP);
   checkButton();
@@ -1628,12 +1918,16 @@ bool wifi_reconnect_bypass() {
   }
 #endif
   uint8_t wifi_autoreconnect_cnt = 0;
+  const unsigned long reconnectStarted = millis();
+  Log.warning(F("[WIFI] reconnect cycle started status=%d max_attempts=%u ssid=%s heap=%u" CR),
+              WiFi.status(), maxConnectionRetryNetwork, WiFi.SSID().c_str(), ESP.getFreeHeap());
 #ifdef ESP32
   while (WiFi.status() != WL_CONNECTED && wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
 #else
   while (WiFi.waitForConnectResult() != WL_CONNECTED && wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
 #endif
-    Log.notice(F("Attempting Wifi connection with saved AP: %d" CR), wifi_autoreconnect_cnt);
+    Log.notice(F("[WIFI] reconnect attempt=%u/%u status=%d elapsed_ms=%l" CR),
+               wifi_autoreconnect_cnt + 1, maxConnectionRetryNetwork, WiFi.status(), millis() - reconnectStarted);
 
     WiFi.begin();
 #if defined(WifiGMode) || defined(WifiPower)
@@ -1643,8 +1937,14 @@ bool wifi_reconnect_bypass() {
     wifi_autoreconnect_cnt++;
   }
   if (wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
+    Log.notice(F("[WIFI] reconnected attempts=%u elapsed_ms=%l ssid=%s bssid=%s channel=%d rssi=%d ip=%s gateway=%s dns=%s" CR),
+               wifi_autoreconnect_cnt, millis() - reconnectStarted, WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(),
+               WiFi.channel(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
+               WiFi.dnsIP().toString().c_str());
     return true;
   } else {
+    Log.error(F("[WIFI] reconnect exhausted attempts=%u elapsed_ms=%l final_status=%d ssid=%s heap=%u" CR),
+              wifi_autoreconnect_cnt, millis() - reconnectStarted, WiFi.status(), WiFi.SSID().c_str(), ESP.getFreeHeap());
     return false;
   }
 }
@@ -1928,8 +2228,11 @@ void checkButton() {
   if (timeFromStart < TimeToResetAtStart) {
     blockingWaitForReset();
   } else { // When we are not at start we either check the button as a regular input (ZsensorGPIOInput used) or for a reset
-#    if defined(INPUT_GPIO) && defined(ZsensorGPIOInput) && INPUT_GPIO == TRIGGER_GPIO
-    MeasureGPIOInput();
+#    if defined(INPUT_GPIO) && defined(ZsensorGPIOInput)
+    if (gpioInputChannels[0].enabled && gpioInputChannels[0].pin == TRIGGER_GPIO)
+      MeasureGPIOInput();
+    else
+      blockingWaitForReset();
 #    else
     blockingWaitForReset();
 #    endif
@@ -1939,10 +2242,22 @@ void checkButton() {
 void checkButton() {}
 #  endif
 
+static bool copyConfigString(char* destination, size_t capacity, const char* source, const char* field) {
+  if (!source || strlen(source) >= capacity) {
+    Log.warning(F("Ignoring invalid or oversized config field: %s" CR), field);
+    return false;
+  }
+  memcpy(destination, source, strlen(source) + 1);
+  return true;
+}
+
 void saveConfig() {
   Log.trace(F("saving configs" CR));
 
-  int totalSize = 512;
+  int totalSize = 1024;
+#  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+  totalSize += GPIO_INPUT_MAX * (JSON_OBJECT_SIZE(3) + GPIO_INPUT_NAME_SIZE + 16);
+#  endif
 #  if !MQTT_BROKER_MODE
   for (int i = 0; i < 3; ++i) { // index 0 contains the default values from the build, these values can't be changed at runtime
     if (cnt_parameters_array[i].validConnection) {
@@ -2024,6 +2339,25 @@ void saveConfig() {
 #  endif
   json["gateway_name"] = gateway_name;
   json["ota_pass"] = ota_pass;
+#  ifdef MQTT_WOL_ENABLED
+  json["mqtt_wol_enabled"] = mqttWOLConfig.enabled;
+  json["mqtt_wol_mac"] = mqttWOLConfig.mac;
+  json["mqtt_wol_delay_ms"] = mqttWOLConfig.initialDelayMs;
+  json["mqtt_wol_failures"] = mqttWOLConfig.minFailures;
+  json["mqtt_wol_repeat_ms"] = mqttWOLConfig.repeatIntervalMs;
+  json["mqtt_wol_transport"] = mqttWOLConfig.onTransportError;
+  json["mqtt_wol_broker"] = mqttWOLConfig.onBrokerError;
+  json["mqtt_wol_auth"] = mqttWOLConfig.onAuthError;
+#  endif
+#  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+  JsonArray gpioInputs = json.createNestedArray("gpio_inputs");
+  for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+    JsonObject gpioInput = gpioInputs.createNestedObject();
+    gpioInput["enabled"] = gpioInputChannels[channel].enabled;
+    gpioInput["pin"] = gpioInputChannels[channel].pin;
+    gpioInput["name"] = gpioInputChannels[channel].name;
+  }
+#  endif
 
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
@@ -2110,22 +2444,22 @@ bool loadConfigFromFlash() {
           strcpy(key, "mqtt_server");
           strcat(key, index_suffix);
           if (json.containsKey(key)) {
-            strcpy(cnt_parameters_array[i].mqtt_server, json[key].as<const char*>());
+            copyConfigString(cnt_parameters_array[i].mqtt_server, sizeof(cnt_parameters_array[i].mqtt_server), json[key].as<const char*>(), key);
           }
           strcpy(key, "mqtt_port");
           strcat(key, index_suffix);
           if (json.containsKey(key)) {
-            strcpy(cnt_parameters_array[i].mqtt_port, json[key].as<const char*>());
+            copyConfigString(cnt_parameters_array[i].mqtt_port, sizeof(cnt_parameters_array[i].mqtt_port), json[key].as<const char*>(), key);
           }
           strcpy(key, "mqtt_user");
           strcat(key, index_suffix);
           if (json.containsKey(key)) {
-            strcpy(cnt_parameters_array[i].mqtt_user, json[key].as<const char*>());
+            copyConfigString(cnt_parameters_array[i].mqtt_user, sizeof(cnt_parameters_array[i].mqtt_user), json[key].as<const char*>(), key);
           }
           strcpy(key, "mqtt_pass");
           strcat(key, index_suffix);
           if (json.containsKey(key)) {
-            strcpy(cnt_parameters_array[i].mqtt_pass, json[key].as<const char*>());
+            copyConfigString(cnt_parameters_array[i].mqtt_pass, sizeof(cnt_parameters_array[i].mqtt_pass), json[key].as<const char*>(), key);
           }
           strcpy(key, "mqtt_broker_secure");
           strcat(key, index_suffix);
@@ -2152,15 +2486,15 @@ bool loadConfigFromFlash() {
         }
 #  endif
         if (json.containsKey("mqtt_topic"))
-          strcpy(mqtt_topic, json["mqtt_topic"]);
+          copyConfigString(mqtt_topic, sizeof(mqtt_topic), json["mqtt_topic"].as<const char*>(), "mqtt_topic");
 #  ifdef ZmqttDiscovery
         if (json.containsKey("discovery_prefix"))
-          strcpy(discovery_prefix, json["discovery_prefix"]);
+          copyConfigString(discovery_prefix, sizeof(discovery_prefix), json["discovery_prefix"].as<const char*>(), "discovery_prefix");
 #  endif
         if (json.containsKey("gateway_name"))
-          strcpy(gateway_name, json["gateway_name"]);
+          copyConfigString(gateway_name, sizeof(gateway_name), json["gateway_name"].as<const char*>(), "gateway_name");
         if (json.containsKey("ota_pass")) {
-          strcpy(ota_pass, json["ota_pass"]);
+          copyConfigString(ota_pass, sizeof(ota_pass), json["ota_pass"].as<const char*>(), "ota_pass");
 #  ifdef WM_PWD_FROM_MAC // From ESP Mac Address, last 8 digits as the password
           // Compare the existing ota_pass if ota_pass = OTAPASSWORD then replace with the last 8 digits of the mac address
           // This enable user migrating from previous version to have the same WiFi portal password as previously unless they changed it
@@ -2171,6 +2505,60 @@ bool loadConfigFromFlash() {
           }
 #  endif
         }
+#  ifdef MQTT_WOL_ENABLED
+        if (json.containsKey("mqtt_wol_enabled"))
+          mqttWOLConfig.enabled = json["mqtt_wol_enabled"].as<bool>();
+        if (json.containsKey("mqtt_wol_mac")) {
+          const char* storedMac = json["mqtt_wol_mac"].as<const char*>();
+          byte parsedMac[6];
+          if (storedMac && mqttWOLParseMAC(storedMac, parsedMac)) {
+            strncpy(mqttWOLConfig.mac, storedMac, sizeof(mqttWOLConfig.mac) - 1);
+            mqttWOLConfig.mac[sizeof(mqttWOLConfig.mac) - 1] = '\0';
+          } else {
+            Log.warning(F("Ignoring invalid stored MQTT WOL MAC" CR));
+          }
+        }
+        if (json.containsKey("mqtt_wol_delay_ms")) {
+          unsigned long value = json["mqtt_wol_delay_ms"].as<unsigned long>();
+          mqttWOLConfig.initialDelayMs = value <= 86400000UL ? value : MQTT_WOL_INITIAL_DELAY_MS;
+        }
+        if (json.containsKey("mqtt_wol_failures")) {
+          unsigned int value = json["mqtt_wol_failures"].as<unsigned int>();
+          mqttWOLConfig.minFailures = value >= 1 && value <= 1000 ? value : MQTT_WOL_MIN_FAILURES;
+        }
+        if (json.containsKey("mqtt_wol_repeat_ms")) {
+          unsigned long value = json["mqtt_wol_repeat_ms"].as<unsigned long>();
+          mqttWOLConfig.repeatIntervalMs = value <= 86400000UL ? value : MQTT_WOL_REPEAT_INTERVAL_MS;
+        }
+        if (json.containsKey("mqtt_wol_transport"))
+          mqttWOLConfig.onTransportError = json["mqtt_wol_transport"].as<bool>();
+        if (json.containsKey("mqtt_wol_broker"))
+          mqttWOLConfig.onBrokerError = json["mqtt_wol_broker"].as<bool>();
+        if (json.containsKey("mqtt_wol_auth"))
+          mqttWOLConfig.onAuthError = json["mqtt_wol_auth"].as<bool>();
+        Log.notice(F("[WOL] configuration loaded enabled=%T target=%s min_failures=%u delay_ms=%l repeat_ms=%l triggers=transport:%T,broker:%T,auth:%T" CR),
+                   mqttWOLConfig.enabled, mqttWOLConfig.mac, mqttWOLConfig.minFailures,
+                   mqttWOLConfig.initialDelayMs, mqttWOLConfig.repeatIntervalMs,
+                   mqttWOLConfig.onTransportError, mqttWOLConfig.onBrokerError, mqttWOLConfig.onAuthError);
+#  endif
+#  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+        if (json["gpio_inputs"].is<JsonArray>()) {
+          JsonArray storedGPIOInputs = json["gpio_inputs"].as<JsonArray>();
+          uint8_t channel = 0;
+          for (JsonObject storedGPIOInput : storedGPIOInputs) {
+            if (channel >= GPIO_INPUT_MAX) break;
+            gpioInputChannels[channel].enabled = storedGPIOInput["enabled"] | false;
+            gpioInputChannels[channel].pin = storedGPIOInput["pin"] | 0;
+            const char* storedName = storedGPIOInput["name"] | "";
+            strncpy(gpioInputChannels[channel].name, storedName, sizeof(gpioInputChannels[channel].name) - 1);
+            gpioInputChannels[channel].name[sizeof(gpioInputChannels[channel].name) - 1] = '\0';
+            Log.notice(F("[GPIO] configuration loaded channel=%u enabled=%T name=%s pin=%u" CR),
+                       channel + 1, gpioInputChannels[channel].enabled,
+                       gpioInputChannels[channel].name, gpioInputChannels[channel].pin);
+            channel++;
+          }
+        }
+#  endif
         result = true;
       } else {
         Log.warning(F("failed to load json config" CR));
@@ -2196,6 +2584,12 @@ bool loadConfigFromFlash() {
 void setupWiFiManager() {
   delay(10);
   WiFi.mode(WIFI_STA);
+#  ifdef ESP32
+  WiFi.setAutoReconnect(true);
+#    if defined(WIFI_DISABLE_POWER_SAVE) && WIFI_DISABLE_POWER_SAVE
+  WiFi.setSleep(false);
+#    endif
+#  endif
 
 #  ifdef USE_MAC_AS_GATEWAY_NAME
   String s = WiFi.macAddress();
@@ -2214,7 +2608,7 @@ void setupWiFiManager() {
   WiFiManagerParameter custom_mqtt_server("server", "mqtt server", cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_server, parameters_size, " minlength='1' maxlength='64' required");
   WiFiManagerParameter custom_mqtt_port("port", "mqtt port", cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_port, 6, " minlength='1' maxlength='5' required");
   WiFiManagerParameter custom_mqtt_user("user", "mqtt user", cnt_parameters_array[CNT_DEFAULT_INDEX].mqtt_user, parameters_size, " maxlength='64'");
-  WiFiManagerParameter custom_mqtt_pass("pass", "mqtt pass", MQTT_PASS, parameters_size, " input type='password' maxlength='64'");
+  WiFiManagerParameter custom_mqtt_pass("pass", "mqtt pass", "", parameters_size, " input type='password' maxlength='64' placeholder='Leave empty to keep saved password'");
   WiFiManagerParameter custom_mqtt_secure("secure", "<br/>mqtt secure", "1", 2, cnt_parameters_array[CNT_DEFAULT_INDEX].isConnectionSecure ? "type=\"checkbox\" checked" : "type=\"checkbox\"");
   WiFiManagerParameter custom_validate_cert("validate", "<br/>validate cert", "1", 2, cnt_parameters_array[CNT_DEFAULT_INDEX].isCertValidate ? "type=\"checkbox\" checked" : "type=\"checkbox\"");
   WiFiManagerParameter custom_mqtt_cert("cert", "<br/>mqtt server cert", "", 4096);
@@ -2333,16 +2727,18 @@ void setupWiFiManager() {
     cnt_index = CNT_DEFAULT_INDEX;
 #  ifndef WIFIMNG_HIDE_MQTT_CONFIG
 #    if !MQTT_BROKER_MODE
-    strcpy(cnt_parameters_array[cnt_index].mqtt_server, custom_mqtt_server.getValue());
-    strcpy(cnt_parameters_array[cnt_index].mqtt_port, custom_mqtt_port.getValue());
-    strcpy(cnt_parameters_array[cnt_index].mqtt_user, custom_mqtt_user.getValue());
-    // Check if the MQTT password field contains the default value
-    if (strcmp(custom_mqtt_pass.getValue(), MQTT_PASS) != 0) {
-      // If it's not the default password, update the MQTT password
-      strcpy(cnt_parameters_array[cnt_index].mqtt_pass, custom_mqtt_pass.getValue());
+    if (strlen(custom_mqtt_server.getValue()) > 0)
+      copyConfigString(cnt_parameters_array[cnt_index].mqtt_server, sizeof(cnt_parameters_array[cnt_index].mqtt_server), custom_mqtt_server.getValue(), "mqtt_server");
+    if (strlen(custom_mqtt_port.getValue()) > 0)
+      copyConfigString(cnt_parameters_array[cnt_index].mqtt_port, sizeof(cnt_parameters_array[cnt_index].mqtt_port), custom_mqtt_port.getValue(), "mqtt_port");
+    if (strlen(custom_mqtt_user.getValue()) > 0)
+      copyConfigString(cnt_parameters_array[cnt_index].mqtt_user, sizeof(cnt_parameters_array[cnt_index].mqtt_user), custom_mqtt_user.getValue(), "mqtt_user");
+    if (strlen(custom_mqtt_pass.getValue()) > 0) {
+      copyConfigString(cnt_parameters_array[cnt_index].mqtt_pass, sizeof(cnt_parameters_array[cnt_index].mqtt_pass), custom_mqtt_pass.getValue(), "mqtt_pass");
     }
-    strcpy(mqtt_topic, custom_mqtt_topic.getValue());
-    if (mqtt_topic[strlen(mqtt_topic) - 1] != '/' && strlen(mqtt_topic) < parameters_size) {
+    if (strlen(custom_mqtt_topic.getValue()) > 0)
+      copyConfigString(mqtt_topic, sizeof(mqtt_topic), custom_mqtt_topic.getValue(), "mqtt_topic");
+    if (strlen(mqtt_topic) > 0 && mqtt_topic[strlen(mqtt_topic) - 1] != '/' && strlen(mqtt_topic) < parameters_size) {
       strcat(mqtt_topic, "/");
     }
 
@@ -2363,8 +2759,10 @@ void setupWiFiManager() {
     }
 #      endif
 #    endif
-    strcpy(gateway_name, custom_gateway_name.getValue());
-    strcpy(ota_pass, custom_ota_pass.getValue());
+    if (strlen(custom_gateway_name.getValue()) > 0)
+      copyConfigString(gateway_name, sizeof(gateway_name), custom_gateway_name.getValue(), "gateway_name");
+    if (strlen(custom_ota_pass.getValue()) > 0)
+      copyConfigString(ota_pass, sizeof(ota_pass), custom_ota_pass.getValue(), "ota_pass");
 #  endif
 
 #  if !MQTT_BROKER_MODE
@@ -2514,6 +2912,27 @@ void loop() {
   }
   unsigned long now = millis();
 
+#ifdef ESP32
+  // Some repeaters expose a provisional DHCP address before restoring the
+  // previous lease. Record silent address changes even when WiFi never emits a
+  // disconnected state and the MQTT socket remains alive.
+  static bool wifiAddressObserved = false;
+  static IPAddress lastWiFiAddress;
+  if (WiFi.status() == WL_CONNECTED) {
+    const IPAddress currentWiFiAddress = WiFi.localIP();
+    if (!wifiAddressObserved) {
+      lastWiFiAddress = currentWiFiAddress;
+      wifiAddressObserved = true;
+    } else if (currentWiFiAddress != lastWiFiAddress) {
+      Log.warning(F("[WIFI] DHCP address changed old=%s new=%s gateway=%s dns=%s rssi=%d mqtt_connected=%T uptime_ms=%l" CR),
+                  lastWiFiAddress.toString().c_str(), currentWiFiAddress.toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str(), WiFi.dnsIP().toString().c_str(), WiFi.RSSI(),
+                  mqtt && mqtt->connected(), now);
+      lastWiFiAddress = currentWiFiAddress;
+    }
+  }
+#endif
+
 #ifdef ZgatewaySERIAL // Serial is a module and a communication layer so it's always processed
   SERIALtoX();
 #endif
@@ -2550,7 +2969,8 @@ void loop() {
 #endif
     }
   } else if (!SYSConfig.offline && !SYSConfig.serial) { // disconnected from network
-    Log.warning(F("Network disconnected" CR));
+    Log.warning(F("[WIFI] network unavailable status=%d mqtt_failures=%d network_failures=%d heap=%u uptime_ms=%l" CR),
+                WiFi.status(), failure_number_mqtt, failure_number_ntwk, ESP.getFreeHeap(), millis());
     gatewayState = GatewayState::NTWK_DISCONNECTED;
     if (!wifi_reconnect_bypass()) {
       sleep();
@@ -2784,6 +3204,10 @@ String stateMeasures() {
   SYSdata["disc"] = SYSConfig.discovery;
   SYSdata["ohdisc"] = SYSConfig.ohdiscovery;
 #endif
+#if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+  SYSdata["mqtt_wol_enabled"] = mqttWOLConfig.enabled;
+  SYSdata["mqtt_wol_mac"] = mqttWOLConfig.mac;
+#endif
   SYSdata["env"] = ENV_NAME;
   uint32_t freeMem;
   uint32_t minFreeMem;
@@ -2806,10 +3230,15 @@ String stateMeasures() {
   SYSdata["msgblck"] = blockedMessages;
   SYSdata["msgrcv"] = receivedMessages;
   SYSdata["maxq"] = maxQueueLength;
+  SYSdata["qsize"] = jsonQueue.size();
+  SYSdata["mqttc"] = mqtt && mqtt->connected();
+  SYSdata["mqttfail"] = failure_number_mqtt;
+  SYSdata["ntwkfail"] = failure_number_ntwk;
   SYSdata["cnt_index"] = cnt_index;
 #ifdef ESP32
   minFreeMem = ESP.getMinFreeHeap();
   SYSdata["minmem"] = minFreeMem;
+  SYSdata["maxalloc"] = ESP.getMaxAllocHeap();
 #  ifndef NO_INT_TEMP_READING
   SYSdata["tempc"] = TheengsUtils::round2(intTemperatureRead());
 #  endif
@@ -2827,6 +3256,8 @@ String stateMeasures() {
 #endif
   } else {
     SYSdata["rssi"] = (long)WiFi.RSSI();
+    SYSdata["wifistatus"] = (int)WiFi.status();
+    SYSdata["channel"] = WiFi.channel();
     SYSdata["SSID"] = (char*)WiFi.SSID().c_str();
     SYSdata["BSSID"] = (char*)WiFi.BSSIDstr().c_str();
     SYSdata["ip"] = TheengsUtils::ip2CharArray(WiFi.localIP());
@@ -2870,7 +3301,7 @@ String stateMeasures() {
 
   String output;
   serializeJson(SYSdata, output);
-  Log.notice(F("SYS json: %s" CR), output.c_str());
+  Log.notice(F("[DIAG] %s" CR), output.c_str());
   return output;
 }
 
@@ -3378,6 +3809,75 @@ void XtoSYS(const char* topicOri, JsonObject& SYSdata) { // json object decoding
       publishState = true;
     }
 #endif
+#if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+    bool hasWOLConfig = SYSdata.containsKey("mqtt_wol_enabled") || SYSdata.containsKey("mqtt_wol_mac") ||
+                        SYSdata.containsKey("mqtt_wol_delay_s") || SYSdata.containsKey("mqtt_wol_failures") ||
+                        SYSdata.containsKey("mqtt_wol_repeat_s") || SYSdata.containsKey("mqtt_wol_transport") ||
+                        SYSdata.containsKey("mqtt_wol_broker") || SYSdata.containsKey("mqtt_wol_auth");
+    if (hasWOLConfig) {
+      MQTTWOLConfig_s updatedWOL = mqttWOLConfig;
+      if (SYSdata.containsKey("mqtt_wol_enabled")) updatedWOL.enabled = SYSdata["mqtt_wol_enabled"].as<bool>();
+      if (SYSdata.containsKey("mqtt_wol_transport")) updatedWOL.onTransportError = SYSdata["mqtt_wol_transport"].as<bool>();
+      if (SYSdata.containsKey("mqtt_wol_broker")) updatedWOL.onBrokerError = SYSdata["mqtt_wol_broker"].as<bool>();
+      if (SYSdata.containsKey("mqtt_wol_auth")) updatedWOL.onAuthError = SYSdata["mqtt_wol_auth"].as<bool>();
+
+      if (SYSdata.containsKey("mqtt_wol_mac")) {
+        const char* requestedMac = SYSdata["mqtt_wol_mac"].as<const char*>();
+        byte parsedMac[6];
+        if ((!requestedMac || !requestedMac[0]) && !updatedWOL.enabled) {
+          updatedWOL.mac[0] = '\0';
+        } else if (!requestedMac || !mqttWOLParseMAC(requestedMac, parsedMac)) {
+          Log.error(F("Invalid MQTT WOL MAC - ignoring configuration" CR));
+          return;
+        } else {
+          strncpy(updatedWOL.mac, requestedMac, sizeof(updatedWOL.mac) - 1);
+          updatedWOL.mac[sizeof(updatedWOL.mac) - 1] = '\0';
+        }
+      }
+
+      if (SYSdata.containsKey("mqtt_wol_delay_s")) {
+        unsigned long seconds = SYSdata["mqtt_wol_delay_s"].as<unsigned long>();
+        if (seconds > 86400UL) {
+          Log.error(F("MQTT WOL initial delay exceeds 86400 seconds" CR));
+          return;
+        }
+        updatedWOL.initialDelayMs = seconds * 1000UL;
+      }
+      if (SYSdata.containsKey("mqtt_wol_repeat_s")) {
+        unsigned long seconds = SYSdata["mqtt_wol_repeat_s"].as<unsigned long>();
+        if (seconds > 86400UL) {
+          Log.error(F("MQTT WOL repeat interval exceeds 86400 seconds" CR));
+          return;
+        }
+        updatedWOL.repeatIntervalMs = seconds * 1000UL;
+      }
+      if (SYSdata.containsKey("mqtt_wol_failures")) {
+        unsigned int failures = SYSdata["mqtt_wol_failures"].as<unsigned int>();
+        if (failures < 1 || failures > 1000) {
+          Log.error(F("MQTT WOL failures must be between 1 and 1000" CR));
+          return;
+        }
+        updatedWOL.minFailures = failures;
+      }
+
+      byte validatedWOLMac[6];
+      if (updatedWOL.enabled && !mqttWOLParseMAC(updatedWOL.mac, validatedWOLMac)) {
+        Log.error(F("Cannot enable MQTT WOL without a valid destination MAC" CR));
+        return;
+      }
+
+      mqttWOLConfig = updatedWOL;
+      mqttWOLConnected();
+#  ifndef ESPWifiManualSetup
+      saveConfig();
+#  endif
+      Log.notice(F("[WOL] configuration saved enabled=%T target=%s min_failures=%u delay_ms=%l repeat_ms=%l triggers=transport:%T,broker:%T,auth:%T" CR),
+                 mqttWOLConfig.enabled, mqttWOLConfig.mac, mqttWOLConfig.minFailures,
+                 mqttWOLConfig.initialDelayMs, mqttWOLConfig.repeatIntervalMs,
+                 mqttWOLConfig.onTransportError, mqttWOLConfig.onBrokerError, mqttWOLConfig.onAuthError);
+      publishState = true;
+    }
+#endif
     if (SYSdata.containsKey("wifi_ssid") && SYSdata["wifi_ssid"].is<const char*>() && SYSdata.containsKey("wifi_pass") && SYSdata["wifi_pass"].is<const char*>()) {
 #ifdef ESP32
       ProcessLock = true;
@@ -3415,18 +3915,18 @@ void XtoSYS(const char* topicOri, JsonObject& SYSdata) { // json object decoding
         (SYSdata.containsKey("gateway_name") && SYSdata["gateway_name"].is<const char*>()) ||
         (SYSdata.containsKey("gw_pass") && SYSdata["gw_pass"].is<const char*>())) {
       if (SYSdata.containsKey("mqtt_topic")) {
-        strncpy(mqtt_topic, SYSdata["mqtt_topic"], parameters_size);
+        copyConfigString(mqtt_topic, sizeof(mqtt_topic), SYSdata["mqtt_topic"].as<const char*>(), "mqtt_topic");
       }
 #ifdef ZmqttDiscovery
       if (SYSdata.containsKey("discovery_prefix")) {
-        strncpy(discovery_prefix, SYSdata["discovery_prefix"], parameters_size);
+        copyConfigString(discovery_prefix, sizeof(discovery_prefix), SYSdata["discovery_prefix"].as<const char*>(), "discovery_prefix");
       }
 #endif
       if (SYSdata.containsKey("gateway_name")) {
-        strncpy(gateway_name, SYSdata["gateway_name"], parameters_size);
+        copyConfigString(gateway_name, sizeof(gateway_name), SYSdata["gateway_name"].as<const char*>(), "gateway_name");
       }
       if (SYSdata.containsKey("gw_pass")) {
-        strncpy(ota_pass, SYSdata["gw_pass"], parameters_size);
+        copyConfigString(ota_pass, sizeof(ota_pass), SYSdata["gw_pass"].as<const char*>(), "gw_pass");
         restartESP = true;
       }
 #ifndef ESPWifiManualSetup
@@ -3468,20 +3968,23 @@ void XtoSYS(const char* topicOri, JsonObject& SYSdata) { // json object decoding
 
       Log.notice(F("MQTT cnt index %d" CR), cnt_index);
 
-      if (SYSdata.containsKey("mqtt_user") && SYSdata["mqtt_user"].is<const char*>() && SYSdata.containsKey("mqtt_pass") && SYSdata["mqtt_pass"].is<const char*>()) {
-        strcpy(cnt_parameters_array[cnt_index].mqtt_user, SYSdata["mqtt_user"]);
-        strcpy(cnt_parameters_array[cnt_index].mqtt_pass, SYSdata["mqtt_pass"]);
-        cnt_parameters_array[cnt_index].validConnection = false;
+      if (SYSdata.containsKey("mqtt_user") && SYSdata["mqtt_user"].is<const char*>()) {
+        if (copyConfigString(cnt_parameters_array[cnt_index].mqtt_user, sizeof(cnt_parameters_array[cnt_index].mqtt_user), SYSdata["mqtt_user"].as<const char*>(), "mqtt_user"))
+          cnt_parameters_array[cnt_index].validConnection = false;
+      }
+      if (SYSdata.containsKey("mqtt_pass") && SYSdata["mqtt_pass"].is<const char*>()) {
+        if (copyConfigString(cnt_parameters_array[cnt_index].mqtt_pass, sizeof(cnt_parameters_array[cnt_index].mqtt_pass), SYSdata["mqtt_pass"].as<const char*>(), "mqtt_pass"))
+          cnt_parameters_array[cnt_index].validConnection = false;
       }
 
       if (SYSdata.containsKey("mqtt_server") && SYSdata["mqtt_server"].is<const char*>()) {
-        strcpy(cnt_parameters_array[cnt_index].mqtt_server, SYSdata["mqtt_server"]);
-        cnt_parameters_array[cnt_index].validConnection = false;
+        if (copyConfigString(cnt_parameters_array[cnt_index].mqtt_server, sizeof(cnt_parameters_array[cnt_index].mqtt_server), SYSdata["mqtt_server"].as<const char*>(), "mqtt_server"))
+          cnt_parameters_array[cnt_index].validConnection = false;
       }
 
       if (SYSdata.containsKey("mqtt_port") && SYSdata["mqtt_port"].is<const char*>()) {
-        strcpy(cnt_parameters_array[cnt_index].mqtt_port, SYSdata["mqtt_port"]);
-        cnt_parameters_array[cnt_index].validConnection = false;
+        if (copyConfigString(cnt_parameters_array[cnt_index].mqtt_port, sizeof(cnt_parameters_array[cnt_index].mqtt_port), SYSdata["mqtt_port"].as<const char*>(), "mqtt_port"))
+          cnt_parameters_array[cnt_index].validConnection = false;
       }
 
       if (SYSdata.containsKey("mqtt_secure") && SYSdata["mqtt_secure"].is<bool>()) {

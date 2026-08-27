@@ -29,6 +29,23 @@
 extern void setupGPIOInput();
 extern void GPIOInputtoX();
 extern void MeasureGPIOInput();
+extern void forcePublishGPIOState();
+#ifndef GPIO_INPUT_MAX
+#  define GPIO_INPUT_MAX 1
+#endif
+#ifndef GPIO_INPUT_NAME_SIZE
+#  define GPIO_INPUT_NAME_SIZE 32
+#endif
+
+struct GPIOInputChannelConfig_s {
+  bool enabled;
+  uint8_t pin;
+  char name[GPIO_INPUT_NAME_SIZE];
+};
+
+extern GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX];
+extern const char* gpioInputPinValidationError(int pin);
+extern String gpioInputTopic(uint8_t channel);
 /*----------------------------USER PARAMETERS-----------------------------*/
 /*-------------DEFINE YOUR MQTT PARAMETERS BELOW----------------*/
 #define subjectGPIOInputtoMQTT "/GPIOInputtoMQTT"

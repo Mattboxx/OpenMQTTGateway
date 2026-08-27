@@ -62,7 +62,11 @@
 #else
 #  define configure_6
 #endif
-#define configure_7
+#if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
+#  define configure_7 "<p><form action='gi' method='get'><button>Configure GPIO Inputs</button></form></p>"
+#else
+#  define configure_7
+#endif
 #define configure_8
 
 /*------------------- ----------------------*/
@@ -88,6 +92,7 @@ const char root_body[] = body_header "<fieldset><div style='padding:0; height:7.
 const char config_body[] = body_header "" configure_1 "" configure_2 "" configure_3 "" configure_4 "" configure_5 "" configure_6 "" configure_7 "" configure_8 "<div id=but1d style='display: block;'></div><p><form id=but1 style='display: block;' action='rt' method='get' onsubmit='return confirm(\"Confirm Reset Configuration\");'><button name='non' class='button bred'>Reset Configuration</button></form>" body_footer_main_menu;
 
 const char reset_body[] = body_header "<div style='text-align:center;'>%s</div><br><div style='text-align:center;'>Device will restart in a few seconds</div><br>" body_footer_main_menu;
+const char config_saved_body[] = body_header "<div style='text-align:center;'>%s</div><br>" body_footer_config_menu;
 
 //const char config_cloud_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>&nbsp;Cloud Configuration&nbsp;</b></span></legend><form method='get' action='cl'><p><label><input id='cl-en' type='checkbox' %s><b>Enable Cloud Connection</b></label></p><br><p><label><input id='cl-lk' type='checkbox' disabled><b>Cloud Account%s Linked</b></label></p><br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset><p><form action='%s' method='get'><input type='hidden' name='macAddress' value='%s'/><input type='hidden' name='redirect_uri' value='%s'/><input type='hidden' name='gateway_name' value='%s'/><input type='hidden' name='uptime' value='%d'/><input type='hidden' name='RT' value='%d'/><button>Link Cloud Account</button></form></p>" body_footer_config_menu;
 
@@ -100,12 +105,31 @@ const char information_body[] = body_header "<style>td {padding: 0px 5px;}</styl
 const char upgrade_body[] = body_header "<div id='f1' style='display:block;'><fieldset class=\"set1\"><legend><span><b>Upgrade by Web Server</b></span></legend><form method='get' action='up'><br><b>OTA URL</b><br><input id='o' placeholder=\"OTA_URL\" value=\"%s\"><br><br><button type='submit' class='button bgrn'>Start upgrade</button></form></fieldset><br><br><fieldset class=\"set1\"><legend><span><b>Upgrade to Level</b></span></legend><form method='get' action='up'><p><b>Level</b><br><select id='le'><option value='1'>Latest Release</option><option value='2'>Development</option></select></p><br><button type='submit' class='button bgrn'>Start upgrade</button></form></fieldset></div><div id='f2' style='display:none;text-align:center;'><b>Upload started ...</b></div><div id=but2d style=\"display: block;\"></div><p>" body_footer_main_menu;
 
 const char config_wifi_body[] = body_header "%s<br><div><a href='/wi?scan='><b>Scan for all WiFi Networks</b></a></div><br><fieldset class=\"set1\"><legend><span><b>WiFi Parameters</b></span></legend><form method='post' action='wi'><p><b>WiFi Network</b> () <br><input id='s1' name='s1' placeholder=\"Type or Select your WiFi Network\" value=\"%s\"></p><p><label><b>WiFi Password</b></label><br><input id='p1' name='p1' type='password' placeholder=\"Enter your WiFi Password\" ></p><br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;
+
+#if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+#  define MQTT_WOL_FORM \
+    "<hr><p><b>Wake-on-LAN after MQTT failures</b></p>" \
+    "<p><b>Enabled</b><br><input id='we' name='we' type='checkbox' %s></p>" \
+    "<p><b>Destination MAC</b><br><input id='wm' name='wm' maxlength='17' pattern='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' value='%s'></p>" \
+    "<p><b>Initial delay (seconds)</b><br><input id='wd' name='wd' type='number' min='0' max='86400' value='%lu'></p>" \
+    "<p><b>Minimum consecutive failures</b><br><input id='wf' name='wf' type='number' min='1' max='1000' value='%u'></p>" \
+    "<p><b>Repeat interval (seconds, 0 = once)</b><br><input id='wr' name='wr' type='number' min='0' max='86400' value='%lu'></p>" \
+    "<p><b>Trigger on transport/TLS error</b><br><input id='wt' name='wt' type='checkbox' %s></p>" \
+    "<p><b>Trigger on broker rejection</b><br><input id='wb' name='wb' type='checkbox' %s></p>" \
+    "<p><b>Trigger on authentication error</b><br><input id='wa' name='wa' type='checkbox' %s></p>"
+#else
+#  define MQTT_WOL_FORM ""
+#endif
+
 #ifdef ZmqttDiscovery
 // mqtt server (mh), mqtt port (ml), mqtt username (mu), mqtt password (mp), secure connection (sc), server certificate (msc), mqtt topic (mt), discovery prefix (dp)
-const char config_mqtt_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>MQTT Parameters</b></span></legend><form method='post' action='mq'><p><b>MQTT Server</b><br><input id='mh' name='mh' placeholder=" MQTT_SERVER " value='%s'></p><p><b>MQTT Port</b><br><input id='ml' name='ml' placeholder=" MQTT_PORT " value='%s'></p><p><b>MQTT Username</b><br><input id='mu' name='mu' placeholder=" MQTT_USER " value='%s'></p><p><label><b>MQTT Password</b></label><br><input id='mp' name='mp' type='password' placeholder=\"Password\" ></p><p><b>MQTT Secure Connection</b><br><input id='sc' name='sc' type='checkbox' %s></p><p><b>Gateway Name</b><br><input id='h' name='h' placeholder=" Gateway_Name " value=\"%s\"></p><p><b>MQTT Base Topic</b><br><input id='mt' name='mt' placeholder='' value='%s'></p><p><b>MQTT Discovery Prefix</b><br><input id='dp' name='dp' placeholder='' value='%s'></p><br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;
+const char config_mqtt_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>MQTT Parameters</b></span></legend><form method='post' action='mq'><p><b>MQTT Server</b><br><input id='mh' name='mh' placeholder=" MQTT_SERVER " value='%s'></p><p><b>MQTT Port</b><br><input id='ml' name='ml' placeholder=" MQTT_PORT " value='%s'></p><p><b>MQTT Username</b><br><input id='mu' name='mu' placeholder=" MQTT_USER " value='%s'></p><p><label><b>MQTT Password</b></label><br><input id='mp' name='mp' type='password' placeholder=\"Leave empty to keep saved password\" maxlength='64'></p><p><b>MQTT Secure Connection</b><br><input id='sc' name='sc' type='checkbox' %s></p><p><b>Gateway Name</b><br><input id='h' name='h' placeholder=" Gateway_Name " value=\"%s\"></p><p><b>MQTT Base Topic</b><br><input id='mt' name='mt' placeholder='' value='%s'></p><p><b>MQTT Discovery Prefix</b><br><input id='dp' name='dp' placeholder='' value='%s'></p>" MQTT_WOL_FORM "<br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;
 #else
 // mqtt server (mh), mqtt port (ml), mqtt username (mu), mqtt password (mp), secure connection (sc), server certificate (msc), mqtt topic (mt)
-const char config_mqtt_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>MQTT Parameters</b></span></legend><form method='post' action='mq'><p><b>MQTT Server</b><br><input id='mh' name='mh' placeholder=" MQTT_SERVER " value='%s'></p><p><b>MQTT Port</b><br><input id='ml' name='ml' placeholder=" MQTT_PORT " value='%s'></p><p><b>MQTT Username</b><br><input id='mu' name='mu' placeholder=" MQTT_USER " value='%s'></p><p><label><b>MQTT Password</b></label><br><input id='mp' name='mp' type='password' placeholder=\"Password\" ></p><p><b>MQTT Secure Connection</b><br><input id='sc' name='sc' type='checkbox' %s></p><p><b>Gateway Name</b><br><input id='h' name='h' placeholder=" Gateway_Name " value=\"%s\"></p><p><b>MQTT Base Topic</b><br><input id='mt' name='mt' placeholder='' value='%s'></p><br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;
+const char config_mqtt_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>MQTT Parameters</b></span></legend><form method='post' action='mq'><p><b>MQTT Server</b><br><input id='mh' name='mh' placeholder=" MQTT_SERVER " value='%s'></p><p><b>MQTT Port</b><br><input id='ml' name='ml' placeholder=" MQTT_PORT " value='%s'></p><p><b>MQTT Username</b><br><input id='mu' name='mu' placeholder=" MQTT_USER " value='%s'></p><p><label><b>MQTT Password</b></label><br><input id='mp' name='mp' type='password' placeholder=\"Leave empty to keep saved password\" maxlength='64'></p><p><b>MQTT Secure Connection</b><br><input id='sc' name='sc' type='checkbox' %s></p><p><b>Gateway Name</b><br><input id='h' name='h' placeholder=" Gateway_Name " value=\"%s\"></p><p><b>MQTT Base Topic</b><br><input id='mt' name='mt' placeholder='' value='%s'></p>" MQTT_WOL_FORM "<br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;
+#endif
+#if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+static_assert(sizeof(config_mqtt_body) + 512 <= WEB_TEMPLATE_BUFFER_MAX_SIZE, "MQTT/WOL WebUI template buffer is too small");
 #endif
 #ifndef ESPWifiManualSetup
 const char config_gateway_body[] = body_header "<fieldset class=\"set1\"><legend><span><b>Gateway Configuration</b></span></legend><form method='post' action='cg'><p><b>Gateway Password (8 characters min)</b><br><input id='gp' name='gp' type='password' placeholder=\"********\"  minlength='8'></p><br><button name='save' type='submit' class='button bgrn'>Save</button></form></fieldset>" body_footer_config_menu;

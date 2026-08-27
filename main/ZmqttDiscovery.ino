@@ -241,7 +241,8 @@ void createDiscovery(const char* sensor_type,
                      int off_delay,
                      const char* payload_available, const char* payload_not_available, bool gateway_entity, const char* cmd_topic,
                      const char* device_name, const char* device_manufacturer, const char* device_model, const char* device_id, bool retainCmd,
-                     const char* state_class, const char* state_off, const char* state_on, const char* enum_options, const char* command_template) {
+                     const char* state_class, const char* state_off, const char* state_on, const char* enum_options, const char* command_template,
+                     const char* pattern) {
   StaticJsonDocument<JSON_MSG_BUFFER> jsonBuffer;
   JsonObject sensor = jsonBuffer.to<JsonObject>();
 
@@ -389,6 +390,9 @@ void createDiscovery(const char* sensor_type,
 
   if (enum_options != nullptr) {
     sensor["options"] = enum_options;
+  }
+  if (pattern != nullptr && pattern[0]) {
+    sensor["ptrn"] = pattern;
   }
 
   StaticJsonDocument<JSON_MSG_BUFFER> jsonDeviceBuffer;
@@ -573,6 +577,28 @@ void pubMqttDiscovery() {
                   "", "", "", "", false, // device name, device manufacturer, device model, device ID, retain
                   stateClassNone //State Class
   );
+#  if defined(MQTT_WOL_ENABLED) && !MQTT_BROKER_MODE
+  createDiscovery("text", //set Type
+                  subjectSYStoMQTT, "WOL: Destination MAC", (char*)getUniqueId("wol-mac", "").c_str(), //set state_topic,name,uniqueId
+                  will_Topic, "", "{{ value_json.mqtt_wol_mac }}", //set availability_topic,device_class,value_template,
+                  "", "", "", //set,payload_on,payload_off,unit_of_meas,
+                  0, //set off_delay
+                  Gateway_AnnouncementMsg, will_Message, true, subjectMQTTtoSYSset, //availability and command topic
+                  "", "", "", "", false, //device metadata and retain command
+                  stateClassNone, nullptr, nullptr, nullptr,
+                  "{\"mqtt_wol_mac\":{{ value | to_json }}}",
+                  "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$"
+  );
+  createDiscovery("switch", //set Type
+                  subjectSYStoMQTT, "WOL: Enabled", (char*)getUniqueId("wol-enabled", "").c_str(), //set state_topic,name,uniqueId
+                  will_Topic, "", "{{ value_json.mqtt_wol_enabled }}", //set availability_topic,device_class,value_template,
+                  "{\"mqtt_wol_enabled\":true}", "{\"mqtt_wol_enabled\":false}", "", //payload_on,payload_off,unit_of_meas,
+                  0, //set off_delay
+                  Gateway_AnnouncementMsg, will_Message, true, subjectMQTTtoSYSset, //availability and command topic
+                  "", "", "", "", false, //device metadata and retain command
+                  stateClassNone, "false", "true"
+  );
+#  endif
   createDiscovery("switch", //set Type
                   subjectSYStoMQTT, "SYS: Auto discovery", (char*)getUniqueId("disc", "").c_str(), //set state_topic,name,uniqueId
                   will_Topic, "", "{{ value_json.disc }}", //set availability_topic,device_class,value_template,
@@ -984,18 +1010,23 @@ void pubMqttDiscovery() {
 
 #  ifdef ZsensorGPIOInput
   Log.trace(F("GPIOInputDiscovery" CR));
-  char* GPIOInputsensor[8] = {"binary_sensor", "GPIOInput", "", "", jsonGpio, INPUT_GPIO_ON_VALUE, INPUT_GPIO_OFF_VALUE, ""};
-  //component type,name,availability topic,device class,value template,payload on, payload off, unit of measurement
-
-  //trc(GPIOInputsensor[1]);
-  createDiscovery(GPIOInputsensor[0],
-                  subjectGPIOInputtoMQTT, GPIOInputsensor[1], (char*)getUniqueId(GPIOInputsensor[1], GPIOInputsensor[2]).c_str(),
-                  will_Topic, GPIOInputsensor[3], GPIOInputsensor[4],
-                  GPIOInputsensor[5], GPIOInputsensor[6], GPIOInputsensor[7],
-                  0, Gateway_AnnouncementMsg, will_Message, true, "",
-                  "", "", "", "", false, // device name, device manufacturer, device model, device ID, retain
-                  stateClassNone //State Class
-  );
+  for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+    String channelId = channel == 0 ? String("GPIOInput") : String("GPIOInput-") + String(channel + 1);
+    String uniqueId = getUniqueId(channelId.c_str(), "");
+    if (!gpioInputChannels[channel].enabled) {
+      eraseTopic("binary_sensor", uniqueId.c_str());
+      continue;
+    }
+    String stateTopic = gpioInputTopic(channel);
+    createDiscovery("binary_sensor",
+                    stateTopic.c_str(), gpioInputChannels[channel].name, uniqueId.c_str(),
+                    will_Topic, "", jsonGpio,
+                    INPUT_GPIO_ON_VALUE, INPUT_GPIO_OFF_VALUE, "",
+                    0, Gateway_AnnouncementMsg, will_Message, true, "",
+                    "", "", "", "", false, // device name, device manufacturer, device model, device ID, retain
+                    stateClassNone //State Class
+    );
+  }
 #  endif
 
 #  ifdef ZsensorINA226
