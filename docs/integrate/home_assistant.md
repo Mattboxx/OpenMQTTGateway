@@ -54,6 +54,12 @@ The custom GPIO preset accepts the Home Assistant binary-sensor classes
 republishes the retained discovery payload; Home Assistant then updates the
 entity icon and its open/closed or active/inactive wording.
 
+For stateful contacts, enable **Retain last state** on the GPIO WebUI page. The
+broker then gives Home Assistant the latest valid reading immediately after a
+Home Assistant or MQTT client restart, without waiting for the contact to move.
+The gateway Last Will availability remains separate, so an offline ESP is still
+reported as unavailable rather than being hidden by the retained reading.
+
 Builds with [MQTT outage Wake-on-LAN](../use/mqtt-wol.md) add a text entity for
 the destination MAC address and a switch for enabling the policy. The remaining
 WOL timing and failure-class settings stay in the gateway WebUI to avoid

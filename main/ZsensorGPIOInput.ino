@@ -38,7 +38,7 @@ struct GPIOInputChannelState_s {
   int previousReading;
 };
 
-GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput", GPIO_INPUT_DEFAULT_MODE, GPIO_INPUT_ACTIVE_LEVEL, GPIOInputDebounceDelay, GPIO_INPUT_CLASS_NONE}};
+GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput", GPIO_INPUT_DEFAULT_MODE, GPIO_INPUT_ACTIVE_LEVEL, GPIOInputDebounceDelay, GPIO_INPUT_RETAIN, GPIO_INPUT_CLASS_NONE}};
 GPIOInputChannelState_s gpioInputStates[GPIO_INPUT_MAX];
 
 String gpioInputTopic(uint8_t channel) {
@@ -147,6 +147,7 @@ void setupGPIOInput() {
       config.mode = GPIO_INPUT_DEFAULT_MODE;
       config.activeLevel = GPIO_INPUT_ACTIVE_LEVEL;
       config.debounceMs = GPIOInputDebounceDelay;
+      config.retainState = GPIO_INPUT_RETAIN;
       config.deviceClass = GPIO_INPUT_CLASS_NONE;
     }
     if (config.mode >= GPIO_INPUT_MODE_COUNT) config.mode = GPIO_INPUT_DEFAULT_MODE;
@@ -177,9 +178,10 @@ void setupGPIOInput() {
     pinMode(config.pin, gpioInputArduinoMode(config.mode));
     const int initialReading = digitalRead(config.pin);
     state.previousReading = initialReading;
-    Log.notice(F("[GPIO] input initialized channel=%u name=%s pin=%u mode=%s active=%s debounce_ms=%u class=%s initial=%s mqtt_topic=%s" CR),
+    Log.notice(F("[GPIO] input initialized channel=%u name=%s pin=%u mode=%s active=%s debounce_ms=%u retain=%T class=%s initial=%s mqtt_topic=%s" CR),
                channel + 1, config.name, config.pin, gpioInputModeName(config.mode),
                config.activeLevel == HIGH ? "HIGH" : "LOW", config.debounceMs,
+               config.retainState,
                gpioInputDeviceClassName(config.deviceClass), initialReading == HIGH ? "HIGH" : "LOW",
                gpioInputTopic(channel).c_str());
   }
@@ -240,13 +242,14 @@ void MeasureGPIOInput() {
       GPIOdata["name"] = config.name;
       GPIOdata["active"] = reading == config.activeLevel;
       GPIOdata["mode"] = gpioInputModeName(config.mode);
+      GPIOdata["retain"] = config.retainState;
       GPIOdata["origin"] = gpioInputTopic(channel);
       const bool queued = enqueueJsonObject(GPIOdata);
-      Log.notice(F("[GPIO] stable change channel=%u name=%s pin=%u previous=%s current=%s active=%T queued=%T mqtt_connected=%T queue=%d uptime_ms=%l" CR),
+      Log.notice(F("[GPIO] stable change channel=%u name=%s pin=%u previous=%s current=%s active=%T retain=%T queued=%T mqtt_connected=%T queue=%d uptime_ms=%l" CR),
                  channel + 1, config.name, config.pin,
                  previousStableState == 3 ? "UNKNOWN" : (previousStableState == HIGH ? "HIGH" : "LOW"),
                  reading == HIGH ? "HIGH" : "LOW", reading == config.activeLevel,
-                 queued, mqtt && mqtt->connected(), queueLength, millis());
+                 config.retainState, queued, mqtt && mqtt->connected(), queueLength, millis());
 
 #  if defined(ZactuatorONOFF) && defined(ACTUATOR_TRIGGER)
       //Trigger the actuator if we are not at startup
@@ -269,12 +272,20 @@ void MeasureGPIOInput() {
 
 void forcePublishGPIOState() {
   for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+    if (!gpioInputChannels[channel].enabled || !gpioInputChannels[channel].retainState) {
+      String fullTopic = String(mqtt_topic) + String(gateway_name) + gpioInputTopic(channel);
+      const bool cleared = pubMQTT(fullTopic.c_str(), "", true);
+      Log.notice(F("[GPIO] retained state cleanup channel=%u enabled=%T retain=%T topic=%s cleared=%T" CR),
+                 channel + 1, gpioInputChannels[channel].enabled,
+                 gpioInputChannels[channel].retainState, fullTopic.c_str(), cleared);
+    }
     if (!gpioInputChannels[channel].enabled) continue;
     const int currentReading = digitalRead(gpioInputChannels[channel].pin);
-    Log.notice(F("[GPIO] MQTT reconnect: scheduling state republish channel=%u pin=%u current=%s previous=%s" CR),
+    Log.notice(F("[GPIO] MQTT reconnect: scheduling state republish channel=%u pin=%u current=%s previous=%s retain=%T" CR),
                channel + 1, gpioInputChannels[channel].pin, currentReading == HIGH ? "HIGH" : "LOW",
                gpioInputStates[channel].stableState == 3 ? "UNKNOWN" :
-                   (gpioInputStates[channel].stableState == HIGH ? "HIGH" : "LOW"));
+                   (gpioInputStates[channel].stableState == HIGH ? "HIGH" : "LOW"),
+               gpioInputChannels[channel].retainState);
     gpioInputStates[channel].stableState = 3;
   }
 }

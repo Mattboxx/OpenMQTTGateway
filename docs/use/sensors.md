@@ -19,6 +19,7 @@ channels. Open **Configuration > GPIO input sensors** in the WebUI to configure:
 * electrical mode: driven `INPUT`, internal `PULLUP` or internal `PULLDOWN`;
 * whether HIGH or LOW represents the active state;
 * a per-channel debounce interval from 10 to 5000 ms;
+* whether the MQTT broker retains the latest valid state;
 * the Home Assistant binary-sensor class, such as door, garage door, window,
   motion, moisture or fault.
 
@@ -40,6 +41,18 @@ Additional channels publish to `/GPIOInputtoMQTT/2`,
 `/GPIOInputtoMQTT/3`, and so on. Each enabled channel publishes on startup,
 after a debounced change and after MQTT reconnects, so retained automation state
 does not depend on waiting for the next physical transition.
+
+MQTT state retention is enabled by default for each GPIO input. It lets a newly
+connected Home Assistant instance immediately receive the last known contact
+state from the broker. Gateway availability remains independent: the entity can
+still report the ESP as offline while the retained payload preserves the last
+valid reading. Turning retention off or disabling a channel clears any retained
+payload previously stored for that channel.
+
+The configured active level is the Home Assistant `ON` state. For `opening`,
+`door`, `garage_door` and `window`, configure Active as the electrical level
+measured while the opening is physically open. Home Assistant can then display
+open/closed semantics directly, without an inverted template sensor.
 
 With `PULLUP`, connect the dry contact between the selected pin and ground. With
 `PULLDOWN`, connect it between the pin and 3.3 V. Use `INPUT` for a sensor that

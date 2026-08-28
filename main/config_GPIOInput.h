@@ -66,6 +66,10 @@ enum GPIOInputDeviceClass : uint8_t {
 #  define GPIO_INPUT_DEBOUNCE_MAX 5000
 #endif
 
+#ifndef GPIO_INPUT_RETAIN
+#  define GPIO_INPUT_RETAIN true
+#endif
+
 struct GPIOInputChannelConfig_s {
   bool enabled;
   uint8_t pin;
@@ -73,6 +77,7 @@ struct GPIOInputChannelConfig_s {
   uint8_t mode;
   uint8_t activeLevel;
   uint16_t debounceMs;
+  bool retainState;
   uint8_t deviceClass;
 };
 

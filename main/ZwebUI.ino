@@ -645,6 +645,7 @@ void handleGI() {
         return;
       }
       requested[channel].debounceMs = (uint16_t)debounce;
+      requested[channel].retainState = server.hasArg("gr" + suffix);
 
       String classText = server.arg("gc" + suffix);
       char* classParseEnd = nullptr;
@@ -671,6 +672,7 @@ void handleGI() {
           requested[channel].mode != gpioInputChannels[channel].mode ||
           requested[channel].activeLevel != gpioInputChannels[channel].activeLevel ||
           requested[channel].debounceMs != gpioInputChannels[channel].debounceMs ||
+          requested[channel].retainState != gpioInputChannels[channel].retainState ||
           requested[channel].deviceClass != gpioInputChannels[channel].deviceClass) {
         update = true;
       }
@@ -679,12 +681,13 @@ void handleGI() {
     if (update) {
       for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
         gpioInputChannels[channel] = requested[channel];
-        Log.notice(F("[WebUI][GPIO] saving channel=%u enabled=%T name=%s pin=%u mode=%s active=%s debounce_ms=%u class=%s" CR),
+        Log.notice(F("[WebUI][GPIO] saving channel=%u enabled=%T name=%s pin=%u mode=%s active=%s debounce_ms=%u retain=%T class=%s" CR),
                    channel + 1, gpioInputChannels[channel].enabled,
                    gpioInputChannels[channel].name, gpioInputChannels[channel].pin,
                    gpioInputModeName(gpioInputChannels[channel].mode),
                    gpioInputChannels[channel].activeLevel == HIGH ? "HIGH" : "LOW",
                    gpioInputChannels[channel].debounceMs,
+                   gpioInputChannels[channel].retainState,
                    gpioInputDeviceClassName(gpioInputChannels[channel].deviceClass));
       }
 #  ifndef ESPWifiManualSetup
@@ -718,7 +721,7 @@ void handleGI() {
   response += String(buffer);
   response += "<fieldset class='set1'><legend><span><b>GPIO input sensors</b></span></legend>";
   response += "<form method='post' action='gi'><div class='info-box'><b>Independent digital sensors</b><br>Enable up to " + String(GPIO_INPUT_MAX) +
-              " inputs. The primary input keeps the existing MQTT and Home Assistant identity. Changes are validated and applied after restart.</div>";
+              " inputs. The primary input keeps the existing MQTT and Home Assistant identity. For opening, door, garage-door and window types, Active must be the electrical level that means open. Changes are validated and applied after restart.</div>";
   for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
     String suffix = String(channel);
     const int currentLevel = gpioInputChannels[channel].enabled ? digitalRead(gpioInputChannels[channel].pin) : LOW;
@@ -745,6 +748,8 @@ void handleGI() {
     response += "<p><b>Debounce</b><small>Filters contact bounce and noisy transitions</small><span class='input-unit'><input name='gd" + suffix +
                 "' type='number' min='" + String(GPIO_INPUT_DEBOUNCE_MIN) + "' max='" + String(GPIO_INPUT_DEBOUNCE_MAX) +
                 "' value='" + String(gpioInputChannels[channel].debounceMs) + "'><span>ms</span></span></p>";
+    response += "<p><b>MQTT state memory</b><small>Keeps the latest valid state in the broker</small><label class='toggle-row'><input type='checkbox' name='gr" + suffix + "'" +
+                (gpioInputChannels[channel].retainState ? " checked" : "") + "><span>Retain last state</span></label></p>";
     response += "<p><b>Home Assistant type</b><small>Controls icon and semantic display</small><select name='gc" + suffix + "'>" +
                 generateGPIOInputDeviceClassOptions(gpioInputChannels[channel].deviceClass) + "</select></p></div></section>";
   }
