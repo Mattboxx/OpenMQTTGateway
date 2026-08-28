@@ -1920,34 +1920,40 @@ bool wifi_reconnect_bypass() {
     return true;
   }
 #endif
-  uint8_t wifi_autoreconnect_cnt = 0;
   const unsigned long reconnectStarted = millis();
-  Log.warning(F("[WIFI] reconnect cycle started status=%d max_attempts=%u ssid=%s heap=%u" CR),
-              WiFi.status(), maxConnectionRetryNetwork, WiFi.SSID().c_str(), ESP.getFreeHeap());
-#ifdef ESP32
-  while (WiFi.status() != WL_CONNECTED && wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
-#else
-  while (WiFi.waitForConnectResult() != WL_CONNECTED && wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
-#endif
-    Log.notice(F("[WIFI] reconnect attempt=%u/%u status=%d elapsed_ms=%l" CR),
-               wifi_autoreconnect_cnt + 1, maxConnectionRetryNetwork, WiFi.status(), millis() - reconnectStarted);
+  unsigned long nextProgressLog = 1000;
+  Log.warning(F("[WIFI] reconnect cycle started status=%d timeout_ms=%l ssid=%s heap=%u" CR),
+              WiFi.status(), (unsigned long)WIFI_INITIAL_CONNECT_TIMEOUT_MS,
+              WiFi.SSID().c_str(), ESP.getFreeHeap());
 
-    WiFi.begin();
+  // Repeated WiFi.begin() calls can restart association and DHCP before they
+  // finish. Start once, then allow the radio a bounded uninterrupted window.
+  WiFi.begin();
 #if defined(WifiGMode) || defined(WifiPower)
-    setESPWifiProtocolTxPower();
+  setESPWifiProtocolTxPower();
 #endif
-    delay(1000);
-    wifi_autoreconnect_cnt++;
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - reconnectStarted < WIFI_INITIAL_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    yield();
+    const unsigned long elapsed = millis() - reconnectStarted;
+    if (elapsed >= nextProgressLog) {
+      Log.notice(F("[WIFI] reconnect waiting status=%d elapsed_ms=%l timeout_ms=%l" CR),
+                 WiFi.status(), elapsed, (unsigned long)WIFI_INITIAL_CONNECT_TIMEOUT_MS);
+      nextProgressLog += 5000;
+    }
   }
-  if (wifi_autoreconnect_cnt < maxConnectionRetryNetwork) {
-    Log.notice(F("[WIFI] reconnected attempts=%u elapsed_ms=%l ssid=%s bssid=%s channel=%d rssi=%d ip=%s gateway=%s dns=%s" CR),
-               wifi_autoreconnect_cnt, millis() - reconnectStarted, WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(),
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Log.notice(F("[WIFI] reconnected elapsed_ms=%l ssid=%s bssid=%s channel=%d rssi=%d ip=%s gateway=%s dns=%s" CR),
+               millis() - reconnectStarted, WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(),
                WiFi.channel(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
                WiFi.dnsIP().toString().c_str());
     return true;
   } else {
-    Log.error(F("[WIFI] reconnect exhausted attempts=%u elapsed_ms=%l final_status=%d ssid=%s heap=%u" CR),
-              wifi_autoreconnect_cnt, millis() - reconnectStarted, WiFi.status(), WiFi.SSID().c_str(), ESP.getFreeHeap());
+    Log.error(F("[WIFI] reconnect timeout elapsed_ms=%l final_status=%d ssid=%s heap=%u recovery_portal=%T" CR),
+              millis() - reconnectStarted, WiFi.status(), WiFi.SSID().c_str(), ESP.getFreeHeap(),
+              (bool)WIFI_RECOVERY_PORTAL);
     return false;
   }
 }
@@ -2704,7 +2710,15 @@ void setupWiFiManager() {
     // Showing the portal if the config file exist would enable access to the configuration data and to the ESP update page
     // This is a security risk if an attacker has access to the gateway password
     if (SPIFFS.exists("/config.json")) {
+#  if WIFI_RECOVERY_PORTAL
+      // The password-protected portal is a recovery path after saved WiFi fails.
+      // Disabling it here otherwise produces an unreachable reboot loop.
+      wifiManager.setEnableConfigPortal(true);
+      Log.warning(F("[WIFI] recovery portal armed ssid=%s timeout_s=%u" CR),
+                  WifiManager_ssid, WifiManager_ConfigPortalTimeOut);
+#  else
       wifiManager.setEnableConfigPortal(false);
+#  endif
     }
   }
 

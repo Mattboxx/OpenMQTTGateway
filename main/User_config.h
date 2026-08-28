@@ -134,6 +134,12 @@
 //#define MDNS_SD //uncomment if you  want to use mDNS for discovering automatically your IP server, please note that mDNS with ESP32 can cause the BLE to not work
 #define maxConnectionRetryNetwork 5 //maximum Wifi connection attempts with existing credential at start (used to bypass ESP32 issue on wifi connect)
 #define maxRetryWatchDog          11 //maximum Wifi or MQTT re-connection attempts before restarting
+#ifndef WIFI_INITIAL_CONNECT_TIMEOUT_MS
+#  define WIFI_INITIAL_CONNECT_TIMEOUT_MS (maxConnectionRetryNetwork * 1000UL)
+#endif
+#ifndef WIFI_RECOVERY_PORTAL
+#  define WIFI_RECOVERY_PORTAL 0
+#endif
 
 //set minimum quality of signal so it ignores AP's under that quality
 #ifndef MinimumWifiSignalQuality

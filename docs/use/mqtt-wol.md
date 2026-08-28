@@ -118,6 +118,14 @@ socket timeout. WiFi automatic reconnect is enabled and power saving is
 disabled. It also avoids restarting the ESP32 solely because the broker remains
 offline, preserving RF and contact-input operation during a long outage.
 
+At startup the preset calls `WiFi.begin()` once and gives association plus DHCP
+an uninterrupted 30-second window. Repeating `WiFi.begin()` every second can
+restart that process before it completes. If saved WiFi still fails, the
+password-protected `OMG_multi_receiver` recovery portal remains enabled for the
+configured portal timeout even when `config.json` exists. This avoids a reboot
+loop in which the gateway has no station IP, no MQTT connection and no visible
+configuration access point.
+
 These are preset choices, not global defaults. They can be adapted in a custom
 environment if lower power consumption or watchdog restarts are preferred.
 
