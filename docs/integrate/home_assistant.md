@@ -48,6 +48,12 @@ entity name. The configured active HIGH/LOW level determines its ON and OFF
 payloads, while the selected device class controls its icon and semantics.
 Disabled channels have their stale discovery topic removed.
 
+The custom GPIO preset accepts the Home Assistant binary-sensor classes
+`opening`, `door`, `garage_door`, `window`, `motion`, `occupancy`, `moisture`,
+`smoke`, `vibration` and `problem`. Saving a class restarts the gateway and
+republishes the retained discovery payload; Home Assistant then updates the
+entity icon and its open/closed or active/inactive wording.
+
 Builds with [MQTT outage Wake-on-LAN](../use/mqtt-wol.md) add a text entity for
 the destination MAC address and a switch for enabling the policy. The remaining
 WOL timing and failure-class settings stay in the gateway WebUI to avoid
