@@ -32,6 +32,29 @@ extern void launchBTDiscovery(bool overrideDiscovery);
 extern void stopProcessing(bool deinit);
 extern String stateBTMeasures(bool);
 
+#ifndef BLE_TRACKER_MAX
+#  define BLE_TRACKER_MAX 4
+#endif
+
+struct BLETrackerConfig_s {
+  bool enabled;
+  char mac[18];
+  char name[33];
+  uint32_t timeoutSeconds;
+  int minRssi;
+  uint32_t lastSeen;
+  uint32_t lastPublish;
+  int lastRssi;
+  bool present;
+};
+
+extern BLETrackerConfig_s BLETrackerConfig[BLE_TRACKER_MAX];
+extern bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char* name, uint32_t timeoutSeconds, int minRssi);
+extern BLETrackerConfig_s getBLETrackerConfig(uint8_t slot);
+extern void saveBLETrackerConfig();
+extern bool isValidBLETrackerMac(const char* mac);
+extern String getBLETrackerCandidatesHtml();
+
 #ifdef ESP32
 #  include "NimBLEDevice.h"
 #endif

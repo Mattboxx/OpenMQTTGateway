@@ -67,7 +67,11 @@
 #else
 #  define configure_7
 #endif
-#define configure_8
+#ifdef ZgatewayBT
+#  define configure_8 "<p><form action='bt' method='get'><button>BLE presence devices</button></form></p>"
+#else
+#  define configure_8
+#endif
 
 /*------------------- ----------------------*/
 

@@ -761,6 +761,114 @@ void handleGI() {
 }
 #endif
 
+#ifdef ZgatewayBT
+void handleBTTrackers() {
+  WEBUI_TRACE_LOG(F("handleBTTrackers: uri: %s, args: %d, method: %d" CR), server.uri(), server.args(), server.method());
+  WEBUI_SECURE
+
+  String notice;
+  if (server.hasArg("save")) {
+    struct RequestedTracker {
+      bool enabled;
+      String mac;
+      String name;
+      uint32_t timeout;
+      int minRssi;
+    } requested[BLE_TRACKER_MAX];
+
+    for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+      String suffix = String(slot);
+      requested[slot].enabled = server.hasArg("be" + suffix);
+      requested[slot].mac = server.arg("bm" + suffix);
+      requested[slot].mac.trim();
+      requested[slot].name = server.arg("bn" + suffix);
+      requested[slot].name.trim();
+      requested[slot].timeout = server.arg("bt" + suffix).toInt();
+      requested[slot].minRssi = server.arg("br" + suffix).toInt();
+
+      if (requested[slot].enabled && !isValidBLETrackerMac(requested[slot].mac.c_str())) {
+        server.send(400, "text/plain", "Invalid BLE MAC for slot " + String(slot + 1) + ". Use AA:BB:CC:DD:EE:FF");
+        return;
+      }
+      if (requested[slot].name.length() > 32) {
+        server.send(400, "text/plain", "Name too long for BLE slot " + String(slot + 1));
+        return;
+      }
+      if (requested[slot].timeout < 5 || requested[slot].timeout > 86400) {
+        server.send(400, "text/plain", "Timeout for BLE slot " + String(slot + 1) + " must be between 5 and 86400 seconds");
+        return;
+      }
+      if (requested[slot].minRssi < -100 || requested[slot].minRssi > -20) {
+        server.send(400, "text/plain", "RSSI threshold for BLE slot " + String(slot + 1) + " must be between -100 and -20 dBm");
+        return;
+      }
+      if (requested[slot].enabled) {
+        for (uint8_t previous = 0; previous < slot; previous++) {
+          if (requested[previous].enabled && requested[previous].mac.equalsIgnoreCase(requested[slot].mac)) {
+            server.send(400, "text/plain", "The same BLE MAC is enabled in more than one slot");
+            return;
+          }
+        }
+      }
+    }
+
+    for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+      if (!configureBLETracker(slot, requested[slot].enabled, requested[slot].mac.c_str(), requested[slot].name.c_str(),
+                               requested[slot].timeout, requested[slot].minRssi)) {
+        server.send(500, "text/plain", "Unable to update BLE slot " + String(slot + 1));
+        return;
+      }
+    }
+    saveBLETrackerConfig();
+    launchBTDiscovery(false);
+    notice = "<div class='info-box'><b>Saved.</b> No restart is required. Home Assistant discovery and retained presence states have been refreshed.</div>";
+    Log.notice(F("[WebUI][BLE] tracker configuration saved" CR));
+  }
+
+  char jsonChar[100];
+  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - BLE presence").c_str());
+  String response = String(buffer) + String(script) + String(style);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, body_header, jsonChar, gateway_name);
+  response += String(buffer);
+  response += "<fieldset class='set1'><legend><span><b>BLE presence in Home Assistant</b></span></legend>";
+  response += notice;
+  response += "<div class='info-box'>Enable only the devices you want to expose. Each slot creates a presence binary sensor and an RSSI sensor in Home Assistant. The presence changes to away after the timeout.</div>";
+  response += "<div class='info-box'><b>Nearby devices:</b> MAC addresses already seen appear as suggestions while typing. A device that randomizes its BLE MAC cannot be followed reliably by MAC.</div>";
+  response += "<form method='post' action='bt'><datalist id='ble-candidates'>" + getBLETrackerCandidatesHtml() + "</datalist>";
+
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
+    String suffix = String(slot);
+    String status = !tracker.enabled ? "disabled" : (tracker.present ? "present" : "away");
+    String chipClass = !tracker.enabled ? "" : (tracker.present ? "active" : "idle");
+    response += "<section class='channel-card'><div class='channel-title'><b>BLE device " + String(slot + 1) +
+                "</b><span class='status-chip " + chipClass + "'>" + status + "</span></div>";
+    response += "<label class='toggle-row'><input type='checkbox' name='be" + suffix + "'" +
+                String(tracker.enabled ? " checked" : "") + "><span>Expose this device in Home Assistant</span></label>";
+    response += "<div class='form-grid'><p><b>Friendly name</b><small>Shown in Home Assistant</small><input name='bn" + suffix +
+                "' maxlength='32' value='" + HtmlEscape(String(tracker.name)) + "' placeholder='Keys, phone, beacon...'></p>";
+    response += "<p><b>BLE MAC address</b><small>Choose a suggestion or enter a fixed MAC</small><input name='bm" + suffix +
+                "' list='ble-candidates' maxlength='17' pattern='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' value='" +
+                HtmlEscape(String(tracker.mac)) + "' placeholder='AA:BB:CC:DD:EE:FF'></p>";
+    response += "<p><b>Away timeout</b><small>Time without advertisements before reporting away</small><span class='input-unit'><input name='bt" + suffix +
+                "' type='number' min='5' max='86400' value='" + String(tracker.timeoutSeconds) + "'><span>s</span></span></p>";
+    response += "<p><b>Minimum signal</b><small>Ignore detections weaker than this threshold</small><span class='input-unit'><input name='br" + suffix +
+                "' type='number' min='-100' max='-20' value='" + String(tracker.minRssi) + "'><span>dBm</span></span></p></div>";
+    if (tracker.enabled) {
+      response += "<small>Last RSSI: " + String(tracker.lastRssi) + " dBm &middot; last seen at uptime " + String(tracker.lastSeen / 1000UL) + " s</small>";
+    }
+    response += "</section>";
+  }
+  response += "<br><button name='save' type='submit' class='button bgrn'>Save BLE devices</button></form></fieldset>";
+  response += String(body_footer_config_menu);
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
+  response += String(buffer);
+  server.send(200, "text/html", response);
+}
+#endif
+
 /**
  * @brief /WI - Configure WiFi Page
  * T: handleWI: uri: /wi, args: 4, method: 1
@@ -2091,6 +2199,9 @@ void WebUISetup() {
   server.on("/wu", handleWU); // Configure WebUI
 #  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
   server.on("/gi", handleGI); // Configure GPIO input sensors
+#  endif
+#  ifdef ZgatewayBT
+  server.on("/bt", handleBTTrackers); // Configure selected BLE presence devices
 #  endif
 #  ifdef ZgatewayLORA
   server.on("/la", handleLA); // Configure LORA

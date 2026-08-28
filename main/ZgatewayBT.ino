@@ -71,6 +71,274 @@ vector<BLEAction> BLEactions;
 vector<BLEdevice*> devices;
 int newDevices = 0;
 
+BLETrackerConfig_s BLETrackerConfig[BLE_TRACKER_MAX];
+static SemaphoreHandle_t semaphoreBLETrackers;
+static bool bleTrackerDiscoveryDirty = true;
+
+struct BLETrackerCandidate_s {
+  char mac[18];
+  char name[25];
+  int rssi;
+  uint32_t lastSeen;
+};
+
+static const uint8_t BLE_TRACKER_CANDIDATE_MAX = 10;
+static BLETrackerCandidate_s bleTrackerCandidates[BLE_TRACKER_CANDIDATE_MAX];
+
+bool isValidBLETrackerMac(const char* mac) {
+  if (!mac || strlen(mac) != 17) return false;
+  for (uint8_t i = 0; i < 17; i++) {
+    if ((i + 1) % 3 == 0) {
+      if (mac[i] != ':') return false;
+    } else if (!isxdigit(static_cast<unsigned char>(mac[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void normalizeBLETrackerMac(const char* source, char* destination) {
+  for (uint8_t i = 0; i < 17; i++) destination[i] = toupper(static_cast<unsigned char>(source[i]));
+  destination[17] = '\0';
+}
+
+static void initBLETrackerConfig() {
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    memset(&BLETrackerConfig[slot], 0, sizeof(BLETrackerConfig_s));
+    BLETrackerConfig[slot].timeoutSeconds = 120;
+    BLETrackerConfig[slot].minRssi = -90;
+    BLETrackerConfig[slot].lastRssi = -127;
+  }
+  memset(bleTrackerCandidates, 0, sizeof(bleTrackerCandidates));
+}
+
+bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char* name, uint32_t timeoutSeconds, int minRssi) {
+  if (slot >= BLE_TRACKER_MAX || (enabled && !isValidBLETrackerMac(mac))) return false;
+  timeoutSeconds = constrain(timeoutSeconds, 5UL, 86400UL);
+  minRssi = constrain(minRssi, -100, -20);
+
+  if (semaphoreBLETrackers && xSemaphoreTake(semaphoreBLETrackers, pdMS_TO_TICKS(2000)) == pdFALSE) {
+    Log.error(F("[BLE][TRACKER] configuration mutex timeout slot=%u" CR), slot + 1);
+    return false;
+  }
+
+  BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
+  char normalizedMac[18] = {0};
+  if (isValidBLETrackerMac(mac)) normalizeBLETrackerMac(mac, normalizedMac);
+  bool identityChanged = strcmp(tracker.mac, normalizedMac) != 0;
+  tracker.enabled = enabled;
+  strlcpy(tracker.mac, normalizedMac, sizeof(tracker.mac));
+  if (name && name[0]) {
+    strlcpy(tracker.name, name, sizeof(tracker.name));
+  } else {
+    snprintf(tracker.name, sizeof(tracker.name), "Dispositivo BLE %u", slot + 1);
+  }
+  tracker.timeoutSeconds = timeoutSeconds;
+  tracker.minRssi = minRssi;
+  if (identityChanged || !enabled) {
+    tracker.lastSeen = 0;
+    tracker.lastPublish = 0;
+    tracker.lastRssi = -127;
+    tracker.present = false;
+  }
+  bleTrackerDiscoveryDirty = true;
+  if (semaphoreBLETrackers) xSemaphoreGive(semaphoreBLETrackers);
+
+  Log.notice(F("[BLE][TRACKER] configured slot=%u enabled=%T name=%s mac=%s timeout_s=%u min_rssi=%d" CR),
+             slot + 1, enabled, tracker.name, tracker.mac, tracker.timeoutSeconds, tracker.minRssi);
+  return true;
+}
+
+BLETrackerConfig_s getBLETrackerConfig(uint8_t slot) {
+  BLETrackerConfig_s copy = {};
+  if (slot >= BLE_TRACKER_MAX) return copy;
+  if (semaphoreBLETrackers && xSemaphoreTake(semaphoreBLETrackers, pdMS_TO_TICKS(2000)) == pdFALSE) return copy;
+  copy = BLETrackerConfig[slot];
+  if (semaphoreBLETrackers) xSemaphoreGive(semaphoreBLETrackers);
+  return copy;
+}
+
+void saveBLETrackerConfig() {
+  DynamicJsonDocument jsonBuffer(1536);
+  JsonArray trackers = jsonBuffer.createNestedArray("trackers");
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
+    JsonObject item = trackers.createNestedObject();
+    item["enabled"] = tracker.enabled;
+    item["mac"] = tracker.mac;
+    item["name"] = tracker.name;
+    item["timeout"] = tracker.timeoutSeconds;
+    item["minrssi"] = tracker.minRssi;
+  }
+  String conf;
+  serializeJson(jsonBuffer, conf);
+  preferences.begin(Gateway_Short_Name, false);
+  size_t written = preferences.putString("BLETrackers", conf);
+  preferences.end();
+  Log.notice(F("[BLE][TRACKER] configuration saved slots=%u bytes=%u result=%u" CR), BLE_TRACKER_MAX, conf.length(), written);
+}
+
+static void loadBLETrackerConfig() {
+  preferences.begin(Gateway_Short_Name, true);
+  String conf = preferences.getString("BLETrackers", "");
+  preferences.end();
+  if (!conf.length()) {
+    Log.notice(F("[BLE][TRACKER] no saved configuration; all slots disabled" CR));
+    return;
+  }
+  DynamicJsonDocument jsonBuffer(1536);
+  DeserializationError error = deserializeJson(jsonBuffer, conf);
+  if (error) {
+    Log.error(F("[BLE][TRACKER] invalid saved configuration error=%s bytes=%u" CR), error.c_str(), conf.length());
+    return;
+  }
+  JsonArray trackers = jsonBuffer["trackers"].as<JsonArray>();
+  uint8_t slot = 0;
+  for (JsonObject item : trackers) {
+    if (slot >= BLE_TRACKER_MAX) break;
+    configureBLETracker(slot, item["enabled"] | false, item["mac"] | "", item["name"] | "",
+                        item["timeout"] | 120UL, item["minrssi"] | -90);
+    slot++;
+  }
+  Log.notice(F("[BLE][TRACKER] configuration loaded slots=%u" CR), slot);
+}
+
+static void enqueueBLETrackerState(uint8_t slot, const BLETrackerConfig_s& tracker, const char* reason) {
+  StaticJsonDocument<384> jsonBuffer;
+  JsonObject state = jsonBuffer.to<JsonObject>();
+  String origin = String("/BTtracker/") + String(slot + 1);
+  state["origin"] = origin;
+  state["presence"] = tracker.present;
+  state["rssi"] = tracker.lastRssi;
+  state["mac"] = tracker.mac;
+  state["name"] = tracker.name;
+  state["last_seen"] = tracker.lastSeen / 1000UL;
+  state["retain"] = true;
+  enqueueJsonObject(state, QueueSemaphoreTimeOutTask);
+  Log.notice(F("[BLE][TRACKER] state slot=%u name=%s mac=%s presence=%T rssi=%d reason=%s" CR),
+             slot + 1, tracker.name, tracker.mac, tracker.present, tracker.lastRssi, reason);
+}
+
+static void rememberBLETrackerCandidate(JsonObject& BLEdata) {
+  const char* mac = BLEdata["id"] | "";
+  if (!isValidBLETrackerMac(mac)) return;
+  int rssi = BLEdata["rssi"] | -127;
+  const char* name = BLEdata["name"] | "";
+  uint32_t now = millis();
+  if (!semaphoreBLETrackers || xSemaphoreTake(semaphoreBLETrackers, 0) == pdFALSE) return;
+  int selected = -1;
+  int oldest = 0;
+  for (uint8_t i = 0; i < BLE_TRACKER_CANDIDATE_MAX; i++) {
+    if (strcasecmp(bleTrackerCandidates[i].mac, mac) == 0) selected = i;
+    if (!bleTrackerCandidates[i].mac[0]) {
+      oldest = i;
+      if (selected < 0) selected = i;
+      break;
+    }
+    if (bleTrackerCandidates[i].lastSeen < bleTrackerCandidates[oldest].lastSeen) oldest = i;
+  }
+  if (selected < 0) selected = oldest;
+  normalizeBLETrackerMac(mac, bleTrackerCandidates[selected].mac);
+  if (name[0]) strlcpy(bleTrackerCandidates[selected].name, name, sizeof(bleTrackerCandidates[selected].name));
+  bleTrackerCandidates[selected].rssi = rssi;
+  bleTrackerCandidates[selected].lastSeen = now;
+  xSemaphoreGive(semaphoreBLETrackers);
+}
+
+String getBLETrackerCandidatesHtml() {
+  String html;
+  if (!semaphoreBLETrackers || xSemaphoreTake(semaphoreBLETrackers, pdMS_TO_TICKS(2000)) == pdFALSE) return html;
+  for (uint8_t i = 0; i < BLE_TRACKER_CANDIDATE_MAX; i++) {
+    if (!bleTrackerCandidates[i].mac[0]) continue;
+    String label = bleTrackerCandidates[i].name[0] ? String(bleTrackerCandidates[i].name) : String("Senza nome");
+    label.replace("&", "&amp;");
+    label.replace("<", "&lt;");
+    label.replace(">", "&gt;");
+    label.replace("\"", "&quot;");
+    html += "<option value='" + String(bleTrackerCandidates[i].mac) + "'>" + label + " (" + String(bleTrackerCandidates[i].rssi) + " dBm)</option>";
+  }
+  xSemaphoreGive(semaphoreBLETrackers);
+  return html;
+}
+
+static void updateConfiguredBLETrackers(JsonObject& BLEdata) {
+  rememberBLETrackerCandidate(BLEdata);
+  const char* mac = BLEdata["id"] | "";
+  int rssi = BLEdata["rssi"] | -127;
+  if (!isValidBLETrackerMac(mac) || !semaphoreBLETrackers) return;
+  uint32_t now = millis();
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s publishCopy = {};
+    bool publish = false;
+    const char* reason = "refresh";
+    if (xSemaphoreTake(semaphoreBLETrackers, pdMS_TO_TICKS(50)) == pdFALSE) return;
+    BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
+    if (tracker.enabled && strcasecmp(tracker.mac, mac) == 0 && rssi >= tracker.minRssi) {
+      bool arrived = !tracker.present;
+      tracker.present = true;
+      tracker.lastSeen = now;
+      tracker.lastRssi = rssi;
+      if (arrived || now - tracker.lastPublish >= 30000UL) {
+        tracker.lastPublish = now;
+        publishCopy = tracker;
+        publish = true;
+        reason = arrived ? "detected" : "refresh";
+      }
+    }
+    xSemaphoreGive(semaphoreBLETrackers);
+    if (publish) enqueueBLETrackerState(slot, publishCopy, reason);
+  }
+}
+
+static void updateConfiguredBLETrackerTimeouts() {
+  if (!semaphoreBLETrackers) return;
+  uint32_t now = millis();
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s publishCopy = {};
+    bool publish = false;
+    if (xSemaphoreTake(semaphoreBLETrackers, pdMS_TO_TICKS(50)) == pdFALSE) return;
+    BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
+    if (tracker.enabled && tracker.present && now - tracker.lastSeen >= tracker.timeoutSeconds * 1000UL) {
+      tracker.present = false;
+      tracker.lastPublish = now;
+      publishCopy = tracker;
+      publish = true;
+    }
+    xSemaphoreGive(semaphoreBLETrackers);
+    if (publish) enqueueBLETrackerState(slot, publishCopy, "timeout");
+  }
+}
+
+#  ifdef ZmqttDiscovery
+static void launchConfiguredBLETrackerDiscovery(bool overrideDiscovery) {
+  if (!overrideDiscovery && !bleTrackerDiscoveryDirty) return;
+  bleTrackerDiscoveryDirty = false;
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
+    String slotText = String(slot + 1);
+    String stateTopic = String("/BTtracker/") + slotText;
+    String baseId = String(gateway_name) + "-ble-tracker-" + slotText;
+    if (!tracker.enabled || !tracker.mac[0]) {
+      eraseTopic("binary_sensor", baseId.c_str());
+      eraseTopic("sensor", (baseId + "-rssi").c_str());
+      continue;
+    }
+    createDiscovery("binary_sensor", stateTopic.c_str(), tracker.name, baseId.c_str(),
+                    will_Topic, "presence", "{{ value_json.presence }}", "true", "false", "", 0,
+                    "", "", true, "", "", "", "", "", false, stateClassNone);
+    String rssiName = String(tracker.name) + " RSSI";
+    String rssiId = baseId + "-rssi";
+    createDiscovery("sensor", stateTopic.c_str(), rssiName.c_str(), rssiId.c_str(),
+                    will_Topic, "signal_strength", "{{ value_json.rssi }}", "", "", "dBm", 0,
+                    "", "", true, "", "", "", "", "", false, stateClassMeasurement);
+    enqueueBLETrackerState(slot, tracker, overrideDiscovery ? "mqtt-discovery" : "configuration");
+    Log.notice(F("[BLE][TRACKER] Home Assistant discovery slot=%u name=%s mac=%s" CR), slot + 1, tracker.name, tracker.mac);
+  }
+}
+#  else
+static void launchConfiguredBLETrackerDiscovery(bool) {}
+#  endif
+
 static BLEdevice NO_BT_DEVICE_FOUND = {{0},
                                        0,
                                        false,
@@ -101,7 +369,11 @@ void BTConfig_init() {
   BTConfig.ignoreWBlist = false;
   BTConfig.presenceAwayTimer = PresenceAwayTimer;
   BTConfig.movingTimer = MovingTimer;
+#  if defined(BLE_TRACKER_ONLY) && BLE_TRACKER_ONLY
+  BTConfig.forcePassiveScan = true;
+#  else
   BTConfig.forcePassiveScan = false;
+#  endif
   BTConfig.enabled = EnableBT;
 }
 
@@ -405,6 +677,7 @@ void createOrUpdateDevice(const char* mac, uint8_t flags, int model, int mac_typ
 }
 
 void updateDevicesStatus() {
+  updateConfiguredBLETrackerTimeouts();
   for (vector<BLEdevice*>::iterator it = devices.begin(); it != devices.end(); ++it) {
     BLEdevice* p = *it;
     unsigned long now = millis();
@@ -627,7 +900,11 @@ void procBLETask(void* pvParameters) {
       BLEdata["id"] = mac_address;
       BLEdata["mac_type"] = advertisedDevice->getAddress().getType();
       BLEdata["adv_type"] = advertisedDevice->getAdvType();
+#  if defined(BLE_TRACKER_ONLY) && BLE_TRACKER_ONLY
+      Log.trace(F("[BLE][SCAN] device=%s" CR), BLEdata["id"].as<const char*>());
+#  else
       Log.notice(F("BT Device detected: %s" CR), BLEdata["id"].as<const char*>());
+#  endif
       BLEdevice* device = getDeviceByMac(BLEdata["id"].as<const char*>());
 
       if (BTConfig.filterConnectable && device->connect) {
@@ -687,6 +964,8 @@ void BLEscan() {
   while (uxQueueMessagesWaiting(BLEQueue) || queueLength != 0) { // the criteria on queueLength could be adjusted to parallelize the scan and the queue processing
     delay(1); // Wait for queue to empty, a yield here instead of the delay cause the WDT to trigger
   }
+  // Also evaluate away timers when the radio hears no other BLE devices.
+  updateConfiguredBLETrackerTimeouts();
   Log.notice(F("Scan begin" CR));
   BLEScan* pBLEScan = BLEDevice::getScan();
   MyAdvertisedDeviceCallbacks myCallbacks;
@@ -700,9 +979,12 @@ void BLEscan() {
   pBLEScan->setInterval(BLEScanInterval);
   pBLEScan->setWindow(BLEScanWindow);
   BLEScanResults foundDevices = pBLEScan->start(BTConfig.scanDuration / 1000, false);
-  if (foundDevices.getCount())
+  int foundCount = foundDevices.getCount();
+  if (foundCount)
     scanCount++;
-  Log.notice(F("Found %d devices, scan number %d end" CR), foundDevices.getCount(), scanCount);
+  Log.notice(F("[BLE][SCAN] found=%d scan=%d queue=%u heap=%u" CR), foundCount, scanCount, uxQueueMessagesWaiting(BLEQueue), ESP.getFreeHeap());
+  // NimBLE retains scan results; release them after callbacks have copied the data.
+  pBLEScan->clearResults();
   Log.trace(F("Process BLE stack free: %u" CR), uxTaskGetStackHighWaterMark(xProcBLETaskHandle));
 }
 
@@ -872,8 +1154,27 @@ void setupBTTasksAndBLE() {
 }
 
 void setupBT() {
+  initBLETrackerConfig();
+  semaphoreBLETrackers = xSemaphoreCreateMutex();
+  loadBLETrackerConfig();
   BTConfig_init();
   BTConfig_load();
+#  if defined(BLE_TRACKER_ONLY) && BLE_TRACKER_ONLY
+  // This preset deliberately uses the radio only as a passive presence
+  // observer. Override stale generic BLE settings from older installations so
+  // active scans or connection attempts cannot compromise WiFi/MQTT stability.
+  BTConfig.bleConnect = false;
+  BTConfig.adaptiveScan = false;
+  BTConfig.BLEinterval = TimeBtwRead;
+  BTConfig.intervalActiveScan = TimeBtwRead;
+  BTConfig.scanDuration = Scan_duration;
+  BTConfig.forcePassiveScan = true;
+  BTConfig.ignoreWBlist = true;
+  BTConfig.extDecoderEnable = false;
+  BTConfig.enabled = true;
+  Log.notice(F("[BLE][TRACKER] passive profile scan_ms=%u pause_ms=%u interval=%u window=%u slots=%u" CR),
+             BTConfig.scanDuration, BTConfig.BLEinterval, BLEScanInterval, BLEScanWindow, BLE_TRACKER_MAX);
+#  endif
   Log.notice(F("BLE scans interval: %d" CR), BTConfig.BLEinterval);
   Log.notice(F("BLE connects interval: %d" CR), BTConfig.intervalConnect);
   Log.notice(F("BLE scan duration: %d" CR), BTConfig.scanDuration);
@@ -916,6 +1217,7 @@ boolean valid_service_data(const char* data, int size) {
 // This function always should be called from the main core as it generates direct mqtt messages
 // When overrideDiscovery=true, we publish discovery messages of known devices (even if no new)
 void launchBTDiscovery(bool overrideDiscovery) {
+  launchConfiguredBLETrackerDiscovery(overrideDiscovery);
   if (!overrideDiscovery && newDevices == 0)
     return;
   if (xSemaphoreTake(semaphoreCreateOrUpdateDevice, pdMS_TO_TICKS(QueueSemaphoreTimeOutTask)) == pdFALSE) {
@@ -1138,7 +1440,9 @@ void launchBTDiscovery(bool overrideDiscovery) {
   }
 }
 #  else
-void launchBTDiscovery(bool overrideDiscovery) {}
+void launchBTDiscovery(bool overrideDiscovery) {
+  launchConfiguredBLETrackerDiscovery(overrideDiscovery);
+}
 #  endif
 
 #  if BLEDecoder
@@ -1225,6 +1529,7 @@ void process_bledata(JsonObject& BLEdata) {
   }
 }
 void PublishDeviceData(JsonObject& BLEdata) {
+  updateConfiguredBLETrackers(BLEdata);
   if (abs((int)BLEdata["rssi"] | 0) < abs(BTConfig.minRssi)) { // process only the devices close enough
     // Decode the payload
     process_bledata(BLEdata);
@@ -1297,6 +1602,10 @@ void PublishDeviceData(JsonObject& BLEdata) {
 #  else
 void process_bledata(JsonObject& BLEdata) {}
 void PublishDeviceData(JsonObject& BLEdata) {
+  updateConfiguredBLETrackers(BLEdata);
+#    if defined(BLE_TRACKER_ONLY) && BLE_TRACKER_ONLY
+  return;
+#    endif
   if (abs((int)BLEdata["rssi"] | 0) < abs(BTConfig.minRssi)) { // process only the devices close enough
     // if distance available, check if presenceUseBeaconUuid is true, model_id is IBEACON then set id as uuid
     if (BLEdata.containsKey("distance")) {
