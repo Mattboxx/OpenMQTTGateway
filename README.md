@@ -36,7 +36,7 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
-* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.3)
+* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.4)
 
 Build the dedicated preset with:
 

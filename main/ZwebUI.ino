@@ -695,7 +695,7 @@ void handleGI() {
       serializeJson(modules, jsonChar, measureJson(modules) + 1);
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save GPIO inputs").c_str());
-      String response = String(buffer) + String(script) + String(style) + String(restart_script);
+      String response = String(buffer) + String(restart_script) + String(script) + String(style);
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "GPIO input configuration saved");
       response += String(buffer);
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
