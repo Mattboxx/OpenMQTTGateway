@@ -83,6 +83,10 @@ const char* gpioInputPinValidationError(int pin, uint8_t mode) {
 #  else
   if (mode >= GPIO_INPUT_MODE_COUNT)
     return "input mode is not supported";
+#    if defined(GPIO_INPUT_ALLOWED_MASK)
+  if (pin < 0 || pin >= 64 || !(GPIO_INPUT_ALLOWED_MASK & (1ULL << pin)))
+    return "GPIO is reserved or unsafe for this hardware preset";
+#    endif
 #  if defined(ESP32)
   if (pin < 0 || pin > 39 || pin == 20 || pin == 24 || (pin >= 28 && pin <= 31))
     return "GPIO is not available on a classic ESP32";

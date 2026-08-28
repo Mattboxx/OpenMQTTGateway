@@ -1,3 +1,58 @@
+# OpenMQTTGateway - MQTT recovery and multi-GPIO edition
+
+> **This branch is a clearly scoped, optional extension of OpenMQTTGateway
+> 1.8.1.** It was created for an ESP32 garage gateway that receives 433 MHz
+> devices through a CC1101, monitors wired sensors and can wake the MQTT host.
+> It does not replace or redefine the many other boards and gateway presets in
+> the upstream project.
+
+The ready-to-build preset is `esp32dev-multi_receiver-wol-gpio`. It keeps the
+official `esp32dev-multi_receiver` preset unchanged and adds features that are
+useful when the gateway is installed away from the MQTT/Home Assistant server.
+
+## What this edition adds
+
+| Area | Upstream 1.8.1 behaviour | This optional edition |
+| --- | --- | --- |
+| Wake-on-LAN | No MQTT-outage recovery policy | Configurable target MAC, outage delay, failure threshold, repeat interval and error categories; a successful MQTT connection resets every WOL timer |
+| Wired sensors | One build-time GPIO input | Up to four independently enabled and named inputs configured in the Web UI |
+| Input electronics | Pin mode fixed at compile time | Per-input `INPUT`, `PULLUP` or `PULLDOWN`, active HIGH/LOW, debounce and Home Assistant device class |
+| GPIO safety | Generic board-level validation | The supplied CC1101 preset exposes only pins that do not collide with flash, SPI, CC1101 or ESP32 boot-strapping duties |
+| MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, bounded reconnect timing, longer keepalive, preserved operation while the broker is offline and safer password updates |
+| Diagnostics | General OpenMQTTGateway logs | Stable `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context |
+| Web interface | Original compact Web UI | Responsive card layout, live GPIO state, contextual wiring hints and local `.bin` OTA upload for future custom updates |
+
+The WOL logic deliberately does not send a magic packet after every ordinary
+disconnect. It distinguishes transport failures, broker refusals and
+authentication errors, waits for the configured outage conditions and clears
+stale state after reconnection. This addresses repeated or apparently random
+WOL packets and timers that did not reset correctly.
+
+Typical uses include a garage, gate, shed or equipment cabinet where one ESP32
+must receive RF devices, expose door/contact sensors to Home Assistant and wake
+the machine hosting MQTT when it is genuinely unavailable.
+
+Start here:
+
+* [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
+* [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
+* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.2)
+
+Build the dedicated preset with:
+
+```text
+platformio run -e esp32dev-multi_receiver-wol-gpio
+```
+
+The custom preset is intentionally opt-in. All upstream environments remain
+available, and changes that are not relevant to them stay behind build flags.
+The downloadable firmware is a prerelease: verify wiring and GPIO choices
+before relying on it in an unattended installation.
+
+---
+
+## About the upstream project
+
 [![Community forum](https://img.shields.io/badge/community-forum-brightgreen.svg)](https://community.openmqttgateway.com)
 
 ![Build](https://github.com/1technophile/OpenMQTTGateway/workflows/Build/badge.svg?branch=development)

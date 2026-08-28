@@ -28,6 +28,13 @@ flash, SPI, the CC1101 and enabled RF modules; duplicate enabled pins are
 rejected. The configuration is persisted and applied after a controlled
 restart.
 
+The supplied `esp32dev-multi_receiver-wol-gpio` preset exposes GPIO 4, 13, 14,
+16, 17, 21, 22, 25, 26, 32-36 and 39. Its explicit allow-list prevents a saved
+sensor configuration from taking over flash, UART, SPI/CC1101 or ESP32
+boot-strapping pins. Another hardware preset can define its own
+`GPIO_INPUT_ALLOWED_MASK`; builds without one retain generic board-level
+validation.
+
 Channel 1 keeps the original `/GPIOInputtoMQTT` topic for compatibility.
 Additional channels publish to `/GPIOInputtoMQTT/2`,
 `/GPIOInputtoMQTT/3`, and so on. Each enabled channel publishes on startup,
