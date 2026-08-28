@@ -138,6 +138,15 @@ For post-mortem diagnosis, system state includes `reset_reason`,
 only across an application-requested restart and is consumed at the next boot,
 so a later watchdog or crash is not mislabeled as an older intentional restart.
 
+The ESP32 also derives a standards-compliant network hostname from the gateway
+name: uppercase letters become lowercase and separators such as underscores or
+spaces become hyphens. For the supplied `OMG_multi_receiver` preset, the Web UI
+can therefore be reached at `http://omg-multi-receiver.local/` through mDNS or
+at `http://omg-multi-receiver/` when the router registers the DHCP hostname.
+This remains useful when MQTT is unavailable and the dynamically assigned IP
+cannot be read from the state topic. The active hostname is also included in
+the system-state payload.
+
 These are preset choices, not global defaults. They can be adapted in a custom
 environment if lower power consumption or watchdog restarts are preferred.
 

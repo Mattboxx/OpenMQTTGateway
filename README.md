@@ -18,7 +18,7 @@ useful when the gateway is installed away from the MQTT/Home Assistant server.
 | Wired sensors | One build-time GPIO input | Up to four independently enabled and named inputs configured in the Web UI |
 | Input electronics | Pin mode fixed at compile time | Per-input `INPUT`, `PULLUP` or `PULLDOWN`, active HIGH/LOW, debounce, retained MQTT state and Home Assistant device class |
 | GPIO safety | Generic board-level validation | The supplied CC1101 preset exposes only pins that do not collide with flash, SPI, CC1101 or ESP32 boot-strapping duties |
-| MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
+| MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, predictable DHCP/mDNS hostname, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
 | Diagnostics | General OpenMQTTGateway logs | Stable `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context |
 | Web interface | Original compact Web UI | Responsive card layout, live GPIO state, contextual wiring hints and local `.bin` OTA upload for future custom updates |
 
@@ -36,7 +36,7 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
-* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.7)
+* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.8)
 
 Build the dedicated preset with:
 

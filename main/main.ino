@@ -304,9 +304,11 @@ static int lastRequestedRestartReason = -1;
 static volatile uint32_t wifiDisconnectCount = 0;
 static volatile uint8_t lastWiFiDisconnectReason = 0;
 static bool wifiDiagnosticsRegistered = false;
+static char networkHostname[64] = "openmqttgateway";
 
 void WiFiDiagnosticEvent(arduino_event_id_t event, arduino_event_info_t info);
 const char* wifiDisconnectReasonName(uint8_t reason);
+void updateNetworkHostname();
 
 bool BTProcessLock = true; // Process lock when we want to use a critical function like OTA for example, at start to true so as to wait for critical functions to be performed before BLE start
 
@@ -1985,7 +1987,11 @@ void setOTA() {
   ArduinoOTA.setPort(ota_port);
 
   // Hostname defaults to esp8266-[ChipID]
+#ifdef ESP32
+  ArduinoOTA.setHostname(networkHostname);
+#else
   ArduinoOTA.setHostname(ota_hostname);
+#endif
 
   // No authentication by default
   ArduinoOTA.setPassword(ota_pass);
@@ -2657,6 +2663,7 @@ void setupWiFiManager() {
   delay(10);
 
 #  ifdef ESP32
+  updateNetworkHostname();
   if (!wifiDiagnosticsRegistered) {
     WiFi.onEvent(WiFiDiagnosticEvent);
     wifiDiagnosticsRegistered = true;
@@ -2668,6 +2675,12 @@ void setupWiFiManager() {
 #  endif
   WiFi.mode(WIFI_STA);
 #  ifdef ESP32
+  if (!WiFi.setHostname(networkHostname)) {
+    Log.warning(F("[WIFI] failed to set network hostname=%s" CR), networkHostname);
+  } else {
+    Log.notice(F("[WIFI] hostname=%s webui=http://%s.local/ router_dns=http://%s/" CR),
+               networkHostname, networkHostname, networkHostname);
+  }
   WiFi.setAutoReconnect(true);
 #    if defined(WIFI_DISABLE_POWER_SAVE) && WIFI_DISABLE_POWER_SAVE
   WiFi.setSleep(false);
@@ -2899,6 +2912,33 @@ const char* wifiDisconnectReasonName(uint8_t reason) {
     case WIFI_REASON_AP_TSF_RESET: return "ap_tsf_reset";
     case WIFI_REASON_ROAMING: return "roaming";
     default: return "other";
+  }
+}
+
+void updateNetworkHostname() {
+  size_t outputLength = 0;
+  bool previousWasDash = false;
+
+  for (size_t i = 0; gateway_name[i] != '\0' && outputLength < sizeof(networkHostname) - 1; i++) {
+    char current = gateway_name[i];
+    if (current >= 'A' && current <= 'Z') current = current - 'A' + 'a';
+
+    const bool alphaNumeric = (current >= 'a' && current <= 'z') ||
+                              (current >= '0' && current <= '9');
+    if (alphaNumeric) {
+      networkHostname[outputLength++] = current;
+      previousWasDash = false;
+    } else if (outputLength > 0 && !previousWasDash) {
+      networkHostname[outputLength++] = '-';
+      previousWasDash = true;
+    }
+  }
+
+  while (outputLength > 0 && networkHostname[outputLength - 1] == '-') outputLength--;
+  if (outputLength == 0) {
+    strlcpy(networkHostname, "openmqttgateway", sizeof(networkHostname));
+  } else {
+    networkHostname[outputLength] = '\0';
   }
 }
 #  endif
@@ -3336,6 +3376,7 @@ String stateMeasures() {
   SYSdata["wifi_disconnects"] = wifiDisconnectCount;
   SYSdata["wifi_last_disconnect_reason"] = lastWiFiDisconnectReason;
   SYSdata["wifi_last_disconnect_text"] = wifiDisconnectReasonName(lastWiFiDisconnectReason);
+  SYSdata["hostname"] = networkHostname;
 #endif
 #ifdef LED_ADDRESSABLE
   SYSdata["rgbb"] = SYSConfig.rgbbrightness;
