@@ -297,6 +297,17 @@ static int cnt_index = CNT_DEFAULT_INDEX;
 #  include <nvs.h>
 #  include <nvs_flash.h>
 
+static constexpr uint32_t OMG_RESTART_RTC_MAGIC = 0x4F4D4752UL;
+RTC_NOINIT_ATTR uint32_t omgRestartRtcMagic;
+RTC_NOINIT_ATTR uint8_t omgRequestedRestartReasonRtc;
+static int lastRequestedRestartReason = -1;
+static volatile uint32_t wifiDisconnectCount = 0;
+static volatile uint8_t lastWiFiDisconnectReason = 0;
+static bool wifiDiagnosticsRegistered = false;
+
+void WiFiDiagnosticEvent(arduino_event_id_t event, arduino_event_info_t info);
+const char* wifiDisconnectReasonName(uint8_t reason);
+
 bool BTProcessLock = true; // Process lock when we want to use a critical function like OTA for example, at start to true so as to wait for critical functions to be performed before BLE start
 
 #  if !defined(NO_INT_TEMP_READING)
@@ -1609,9 +1620,18 @@ void setup() {
   Log.begin(LOG_LEVEL, &Serial);
   Log.notice(F(CR "************* WELCOME TO OpenMQTTGateway **************" CR));
 #ifdef ESP32
+  if (omgRestartRtcMagic == OMG_RESTART_RTC_MAGIC) {
+    lastRequestedRestartReason = omgRequestedRestartReasonRtc;
+  }
+  // Consume the retained value so a later watchdog or crash is not incorrectly
+  // attributed to an older application-requested restart.
+  omgRestartRtcMagic = 0;
+  omgRequestedRestartReasonRtc = 0xFF;
   Log.notice(F("[BOOT] version=" OMG_VERSION " env=" ENV_NAME " reset_reason=%d cpu_mhz=%u sdk=%s heap=%u min_heap=%u flash=%u sketch=%u free_sketch=%u" CR),
              (int)esp_reset_reason(), ESP.getCpuFreqMHz(), ESP.getSdkVersion(), ESP.getFreeHeap(),
              ESP.getMinFreeHeap(), ESP.getFlashChipSize(), ESP.getSketchSize(), ESP.getFreeSketchSpace());
+  Log.notice(F("[BOOT] requested_restart_reason=%d (minus_one_means_not_application_requested)" CR),
+             lastRequestedRestartReason);
 #endif
 #if defined(TRIGGER_GPIO) && !defined(ESPWifiManualSetup)
   pinMode(TRIGGER_GPIO, INPUT_PULLUP);
@@ -1922,9 +1942,10 @@ bool wifi_reconnect_bypass() {
 #endif
   const unsigned long reconnectStarted = millis();
   unsigned long nextProgressLog = 1000;
-  Log.warning(F("[WIFI] reconnect cycle started status=%d timeout_ms=%l ssid=%s heap=%u" CR),
+  Log.warning(F("[WIFI] reconnect cycle started status=%d timeout_ms=%l ssid=%s disconnects=%u last_disconnect=%u:%s heap=%u" CR),
               WiFi.status(), (unsigned long)WIFI_INITIAL_CONNECT_TIMEOUT_MS,
-              WiFi.SSID().c_str(), ESP.getFreeHeap());
+              WiFi.SSID().c_str(), wifiDisconnectCount, lastWiFiDisconnectReason,
+              wifiDisconnectReasonName(lastWiFiDisconnectReason), ESP.getFreeHeap());
 
   // Repeated WiFi.begin() calls can restart association and DHCP before they
   // finish. Start once, then allow the radio a bounded uninterrupted window.
@@ -1951,8 +1972,9 @@ bool wifi_reconnect_bypass() {
                WiFi.dnsIP().toString().c_str());
     return true;
   } else {
-    Log.error(F("[WIFI] reconnect timeout elapsed_ms=%l final_status=%d ssid=%s heap=%u recovery_portal=%T" CR),
-              millis() - reconnectStarted, WiFi.status(), WiFi.SSID().c_str(), ESP.getFreeHeap(),
+    Log.error(F("[WIFI] reconnect timeout elapsed_ms=%l final_status=%d ssid=%s disconnects=%u last_disconnect=%u:%s heap=%u recovery_portal=%T" CR),
+              millis() - reconnectStarted, WiFi.status(), WiFi.SSID().c_str(), wifiDisconnectCount,
+              lastWiFiDisconnectReason, wifiDisconnectReasonName(lastWiFiDisconnectReason), ESP.getFreeHeap(),
               (bool)WIFI_RECOVERY_PORTAL);
     return false;
   }
@@ -2113,6 +2135,21 @@ void ESPRestart(byte reason) {
   }
   Log.warning(F("Rebooting for reason code %d" CR), reason);
 #if defined(ESP32)
+  omgRequestedRestartReasonRtc = reason;
+  omgRestartRtcMagic = OMG_RESTART_RTC_MAGIC;
+
+  // Give serial and the direct MQTT publication a short opportunity to drain,
+  // then stop the STA radio cleanly. This avoids carrying a half-open WiFi
+  // driver/association state into a software reset.
+  delay(250);
+  Log.warning(F("[RESTART] clean WiFi shutdown status=%d mode=%d disconnects=%u last_disconnect=%u:%s" CR),
+              WiFi.status(), WiFi.getMode(), wifiDisconnectCount, lastWiFiDisconnectReason,
+              wifiDisconnectReasonName(lastWiFiDisconnectReason));
+  WiFi.disconnect(false, false);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  Serial.flush();
   ESP.restart();
 #elif defined(ESP8266)
   ESP.reset();
@@ -2618,6 +2655,17 @@ bool loadConfigFromFlash() {
 
 void setupWiFiManager() {
   delay(10);
+
+#  ifdef ESP32
+  if (!wifiDiagnosticsRegistered) {
+    WiFi.onEvent(WiFiDiagnosticEvent);
+    wifiDiagnosticsRegistered = true;
+  }
+  // Explicit OFF -> STA transition gives warm reboots the same clean radio
+  // initialization path as a cold power-up without erasing saved credentials.
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+#  endif
   WiFi.mode(WIFI_STA);
 #  ifdef ESP32
   WiFi.setAutoReconnect(true);
@@ -2817,6 +2865,43 @@ void setupWiFiManager() {
     saveConfig();
   }
 }
+
+#  ifdef ESP32
+void WiFiDiagnosticEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    lastWiFiDisconnectReason = info.wifi_sta_disconnected.reason;
+    wifiDisconnectCount++;
+  }
+}
+
+const char* wifiDisconnectReasonName(uint8_t reason) {
+  switch (reason) {
+    case 0: return "none_recorded";
+    case WIFI_REASON_UNSPECIFIED: return "unspecified";
+    case WIFI_REASON_AUTH_EXPIRE: return "auth_expired";
+    case WIFI_REASON_AUTH_LEAVE: return "auth_leave";
+    case WIFI_REASON_ASSOC_EXPIRE: return "association_expired";
+    case WIFI_REASON_ASSOC_LEAVE: return "association_leave";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "four_way_handshake_timeout";
+    case WIFI_REASON_802_1X_AUTH_FAILED: return "802_1x_auth_failed";
+    case WIFI_REASON_MISSING_ACKS: return "missing_acks";
+    case WIFI_REASON_TIMEOUT: return "timeout";
+    case WIFI_REASON_PEER_INITIATED: return "peer_initiated";
+    case WIFI_REASON_AP_INITIATED: return "ap_initiated";
+    case WIFI_REASON_TRANSMISSION_LINK_ESTABLISH_FAILED: return "link_establish_failed";
+    case WIFI_REASON_ALTERATIVE_CHANNEL_OCCUPIED: return "alternate_channel_occupied";
+    case WIFI_REASON_BEACON_TIMEOUT: return "beacon_timeout";
+    case WIFI_REASON_NO_AP_FOUND: return "no_ap_found";
+    case WIFI_REASON_AUTH_FAIL: return "auth_failed";
+    case WIFI_REASON_ASSOC_FAIL: return "association_failed";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT: return "handshake_timeout";
+    case WIFI_REASON_CONNECTION_FAIL: return "connection_failed";
+    case WIFI_REASON_AP_TSF_RESET: return "ap_tsf_reset";
+    case WIFI_REASON_ROAMING: return "roaming";
+    default: return "other";
+  }
+}
+#  endif
 #  ifdef ESP32_ETHERNET
 void setup_ethernet_esp32() {
   bool ethBeginSuccess = false;
@@ -3012,12 +3097,22 @@ void loop() {
 #endif
     }
   } else if (!SYSConfig.offline && !SYSConfig.serial) { // disconnected from network
-    Log.warning(F("[WIFI] network unavailable status=%d mqtt_failures=%d network_failures=%d heap=%u uptime_ms=%l" CR),
-                WiFi.status(), failure_number_mqtt, failure_number_ntwk, ESP.getFreeHeap(), millis());
+    Log.warning(F("[WIFI] network unavailable status=%d mqtt_failures=%d network_failures=%d disconnects=%u last_disconnect=%u:%s heap=%u uptime_ms=%l" CR),
+                WiFi.status(), failure_number_mqtt, failure_number_ntwk, wifiDisconnectCount,
+                lastWiFiDisconnectReason, wifiDisconnectReasonName(lastWiFiDisconnectReason),
+                ESP.getFreeHeap(), millis());
     gatewayState = GatewayState::NTWK_DISCONNECTED;
     if (!wifi_reconnect_bypass()) {
+      failure_number_ntwk++;
+      Log.error(F("[WIFI] runtime reconnect window failed cycle=%d restart_after=%d" CR),
+                failure_number_ntwk, WIFI_RUNTIME_RESTART_AFTER_FAILURES);
+      if (failure_number_ntwk >= WIFI_RUNTIME_RESTART_AFTER_FAILURES) {
+        Log.error(F("[WIFI] runtime recovery threshold reached; restarting into startup recovery path" CR));
+        ESPRestart(2);
+      }
       sleep();
     } else {
+      failure_number_ntwk = 0;
       gatewayState = GatewayState::NTWK_CONNECTED;
     }
   }
@@ -3235,6 +3330,13 @@ String stateMeasures() {
   SYSdata["uptime"] = uptime();
 
   SYSdata["version"] = OMG_VERSION;
+#ifdef ESP32
+  SYSdata["reset_reason"] = (int)esp_reset_reason();
+  SYSdata["requested_restart_reason"] = lastRequestedRestartReason;
+  SYSdata["wifi_disconnects"] = wifiDisconnectCount;
+  SYSdata["wifi_last_disconnect_reason"] = lastWiFiDisconnectReason;
+  SYSdata["wifi_last_disconnect_text"] = wifiDisconnectReasonName(lastWiFiDisconnectReason);
+#endif
 #ifdef LED_ADDRESSABLE
   SYSdata["rgbb"] = SYSConfig.rgbbrightness;
 #endif

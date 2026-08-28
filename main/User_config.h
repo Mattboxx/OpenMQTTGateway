@@ -140,6 +140,11 @@
 #ifndef WIFI_RECOVERY_PORTAL
 #  define WIFI_RECOVERY_PORTAL 0
 #endif
+#ifndef WIFI_RUNTIME_RESTART_AFTER_FAILURES
+// Number of complete reconnect windows allowed after a runtime WiFi loss.
+// A restart re-enters the protected recovery-portal path on builds that enable it.
+#  define WIFI_RUNTIME_RESTART_AFTER_FAILURES maxRetryWatchDog
+#endif
 
 //set minimum quality of signal so it ignores AP's under that quality
 #ifndef MinimumWifiSignalQuality

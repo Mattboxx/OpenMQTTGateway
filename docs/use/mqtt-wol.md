@@ -126,6 +126,18 @@ configured portal timeout even when `config.json` exists. This avoids a reboot
 loop in which the gateway has no station IP, no MQTT connection and no visible
 configuration access point.
 
+Runtime losses use the same bounded strategy. Three complete 30-second
+reconnect windows are attempted; if all fail, the firmware shuts the WiFi radio
+down cleanly and performs a software restart into the startup recovery path.
+The OFF-to-STA transition at startup also avoids reusing a half-open driver or
+association state left by a warm reboot. Saved credentials are not erased.
+
+For post-mortem diagnosis, system state includes `reset_reason`,
+`requested_restart_reason`, `wifi_disconnects` and
+`wifi_last_disconnect_reason`. The requested reason is kept in ESP32 RTC memory
+only across an application-requested restart and is consumed at the next boot,
+so a later watchdog or crash is not mislabeled as an older intentional restart.
+
 These are preset choices, not global defaults. They can be adapted in a custom
 environment if lower power consumption or watchdog restarts are preferred.
 
