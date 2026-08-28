@@ -238,6 +238,8 @@ static void rememberBLETrackerCandidate(JsonObject& BLEdata) {
     if (bleTrackerCandidates[i].lastSeen < bleTrackerCandidates[oldest].lastSeen) oldest = i;
   }
   if (selected < 0) selected = oldest;
+  bool replacingCandidate = strcasecmp(bleTrackerCandidates[selected].mac, mac) != 0;
+  if (replacingCandidate) bleTrackerCandidates[selected].name[0] = '\0';
   normalizeBLETrackerMac(mac, bleTrackerCandidates[selected].mac);
   if (name[0]) strlcpy(bleTrackerCandidates[selected].name, name, sizeof(bleTrackerCandidates[selected].name));
   bleTrackerCandidates[selected].rssi = rssi;
@@ -324,7 +326,7 @@ static void launchConfiguredBLETrackerDiscovery(bool overrideDiscovery) {
       continue;
     }
     createDiscovery("binary_sensor", stateTopic.c_str(), tracker.name, baseId.c_str(),
-                    will_Topic, "presence", "{{ value_json.presence }}", "true", "false", "", 0,
+                    will_Topic, "occupancy", "{{ value_json.presence }}", "true", "false", "", 0,
                     "", "", true, "", "", "", "", "", false, stateClassNone);
     String rssiName = String(tracker.name) + " RSSI";
     String rssiId = baseId + "-rssi";
