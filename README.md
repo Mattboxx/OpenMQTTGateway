@@ -22,7 +22,7 @@ useful when the gateway is installed away from the MQTT/Home Assistant server.
 | GPIO safety | Generic board-level validation | The supplied CC1101 preset exposes only pins that do not collide with flash, SPI, CC1101 or ESP32 boot-strapping duties |
 | BLE presence | BLE presets normally publish/ decode the devices they hear | Up to four fixed-MAC BLE devices selected in the Web UI; each gets a retained Home Assistant presence entity plus RSSI, its own away timeout and minimum-signal threshold |
 | MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, predictable DHCP/mDNS hostname, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
-| Diagnostics | General OpenMQTTGateway logs | Stable `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][ADV]`, `[MEM]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context |
+| Diagnostics | General OpenMQTTGateway logs | Stable `[BOOT]`, `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][ADV]`, `[MEM]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context; a bounded startup guard automatically recovers from a stalled module initialization |
 | Web interface | Original compact Web UI | Responsive card layout, live GPIO/BLE state, nearby-BLE suggestions, contextual wiring hints and local `.bin` OTA upload for future custom updates |
 
 The WOL logic deliberately does not send a magic packet after every ordinary
@@ -51,19 +51,19 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
-* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.38)
+* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.40)
 
 ## Firmware variants
 
 | Variant | Intended use |
 | --- | --- |
 | `v1.8.1-wol-gpio.8` | Stable alternative with WOL and configurable GPIO inputs, but no BLE observer. Its application image is distributed as a normal firmware variant; optional USB flashing files remain under `recovery/v1.8.1-wol-gpio.8`. |
-| `v1.8.1-wol-gpio.38` | Current RF + GPIO + WOL build with selected-device BLE presence, balanced scanning for intermittent advertisements, automatic scan recovery, stable retained presence across restarts, paced local OTA with deferred restart, progressive WebUI pages, queue back-pressure, BLE/WiFi recovery safeguards and automatic cleanup of legacy or disabled HA entities. |
+| `v1.8.1-wol-gpio.40` | Current RF + 2-input/2-output + WOL build with selected-device BLE presence, Home Assistant output switches, balanced scanning for intermittent advertisements, automatic BLE and startup recovery, stable retained presence across restarts, paced local OTA with deferred restart, progressive WebUI pages, queue back-pressure and automatic cleanup of legacy or disabled HA entities. |
 
-The next development image, `v1.8.1-wol-gpio.39-test`, replaces the four-input
-layout with two inputs and two configurable outputs. It is intentionally not
-listed as a stable release until the output switches have also been exercised
-with real attached hardware and Home Assistant.
+The two outputs are disabled by default. Their logical command, retained state,
+active-level inversion and restore-after-restart paths were exercised through
+MQTT/Home Assistant without an attached load; electrically validate any relay,
+LED or buzzer circuit before enabling it.
 
 Build the dedicated preset with:
 

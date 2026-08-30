@@ -391,6 +391,52 @@ void handle_autodiscovery() {
 #endif
 }
 
+#if defined(ESP32) && defined(STARTUP_MODULE_WATCHDOG_MS) && STARTUP_MODULE_WATCHDOG_MS > 0
+static TaskHandle_t startupModuleWatchdogHandle = nullptr;
+static volatile bool startupModuleWatchdogArmed = false;
+
+static void startupModuleWatchdogTask(void* parameter) {
+  const TickType_t timeoutTicks = pdMS_TO_TICKS((uint32_t)STARTUP_MODULE_WATCHDOG_MS);
+  const bool setupCompleted = ulTaskNotifyTake(pdTRUE, timeoutTicks) > 0;
+
+  if (!setupCompleted && startupModuleWatchdogArmed) {
+    Log.error(F("[BOOT] module initialization watchdog expired timeout_ms=%lu heap=%u min_heap=%u; restarting" CR),
+              (unsigned long)STARTUP_MODULE_WATCHDOG_MS, ESP.getFreeHeap(), ESP.getMinFreeHeap());
+    omgRequestedRestartReasonRtc = 10;
+    omgRestartRtcMagic = OMG_RESTART_RTC_MAGIC;
+    Serial.flush();
+    esp_restart();
+  }
+
+  startupModuleWatchdogHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+static void armStartupModuleWatchdog() {
+  startupModuleWatchdogArmed = true;
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      startupModuleWatchdogTask, "omgBootGuard", 2048, nullptr, 2,
+      &startupModuleWatchdogHandle, 0);
+  if (created != pdPASS) {
+    startupModuleWatchdogHandle = nullptr;
+    startupModuleWatchdogArmed = false;
+    Log.error(F("[BOOT] unable to start module initialization watchdog heap=%u max_alloc=%u" CR),
+              ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    return;
+  }
+  Log.notice(F("[BOOT] module initialization watchdog armed timeout_ms=%lu" CR),
+             (unsigned long)STARTUP_MODULE_WATCHDOG_MS);
+}
+
+static void disarmStartupModuleWatchdog() {
+  startupModuleWatchdogArmed = false;
+  TaskHandle_t handle = startupModuleWatchdogHandle;
+  if (handle != nullptr) {
+    xTaskNotifyGive(handle);
+  }
+}
+#endif
+
 #if MQTT_BROKER_MODE
 
 class MQTTServer : public PicoMQTT::Server {
@@ -1640,6 +1686,7 @@ void updateAndHandleLEDsTask() {
 }
 
 void setup() {
+  const unsigned long setupStartedMs = millis();
   //Launch serial for debugging purposes
   Serial.begin(SERIAL_BAUD);
   Log.begin(LOG_LEVEL, &Serial);
@@ -1794,6 +1841,10 @@ void setup() {
 #endif
 
   setOTA();
+
+#if defined(ESP32) && defined(STARTUP_MODULE_WATCHDOG_MS) && STARTUP_MODULE_WATCHDOG_MS > 0
+  armStartupModuleWatchdog();
+#endif
 
 #if defined(ZwebUI) && defined(ESP32)
   WebUISetup();
@@ -1962,6 +2013,11 @@ void setup() {
   char jsonChar[100];
   serializeJson(modules, jsonChar, measureJson(modules) + 1);
   Log.notice(F("OpenMQTTGateway modules: %s" CR), jsonChar);
+#if defined(ESP32) && defined(STARTUP_MODULE_WATCHDOG_MS) && STARTUP_MODULE_WATCHDOG_MS > 0
+  disarmStartupModuleWatchdog();
+  Log.notice(F("[BOOT] module initialization completed elapsed_ms=%lu heap=%u min_heap=%u" CR),
+             millis() - setupStartedMs, ESP.getFreeHeap(), ESP.getMinFreeHeap());
+#endif
   Log.notice(F("************** Setup OpenMQTTGateway end **************" CR));
 }
 
@@ -2154,6 +2210,7 @@ void setupTLS(int index) {
   7 - Parameters changed
   8 - not enough memory to pursue
   9 - SELFTEST end
+  10 - Startup/module initialization watchdog
 */
 void ESPRestart(byte reason) {
 #ifdef SecondaryModule

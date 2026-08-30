@@ -66,7 +66,7 @@ The application image is written to:
 Two deliberately separate firmware variants are retained. Version
 `v1.8.1-wol-gpio.8` is the stable no-BLE edition and includes optional complete
 USB flashing files in `recovery/v1.8.1-wol-gpio.8`. Version
-`v1.8.1-wol-gpio.38` is the current selected-device BLE edition. Its passive
+`v1.8.1-wol-gpio.40` is the current selected-device BLE edition. Its passive
 scan duty cycle balances intermittent-beacon detection with MQTT and WebUI
 responsiveness, and stalled scans are restarted automatically. Local firmware
 uploads yield between flash blocks and restart only after the HTTP response has
@@ -81,11 +81,18 @@ after a complete configured timeout with the scanner running and no match.
 Home Assistant receives the same timeout as `off_delay`, so it can still change
 the entity to away if the gateway itself stops publishing entirely.
 
-Development image `v1.8.1-wol-gpio.39-test` changes the GPIO layout from four
-inputs to two inputs plus two outputs. Outputs default to disabled and OFF, are
-limited to output-capable non-CC1101 pins, and expose independent Home Assistant
-switches when enabled. The `.38` release remains available while this new I/O
-layout is validated on attached output hardware.
+The current image uses two inputs plus two outputs. Outputs default to disabled
+and OFF, are limited to output-capable non-CC1101 pins, and expose independent
+Home Assistant switches when enabled. Logical ON/OFF, active-level inversion,
+retained state, restart restoration and Home Assistant discovery were validated
+without an attached load; the connected circuit must still be checked for the
+ESP32's 3.3 V limits before enabling an output.
+
+A 60-second startup guard runs independently while the WebUI and RF modules are
+initialized. If that phase stalls after a warm restart, the gateway records
+requested restart reason `10` and automatically reboots instead of remaining
+pingable with MQTT and HTTP unavailable. The guard is disarmed and releases its
+task as soon as normal setup completes.
 
 The inherited CC1101 wiring is CS 5, GDO0 12 and GDO2 27. The first contact
 input defaults to GPIO 4 in driven `INPUT` mode, preserving the original garage
@@ -249,10 +256,10 @@ Both `esp32dev-multi_receiver-wol-gpio` and the unchanged upstream
 was exercised on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at
 433.92 MHz. Tests covered authenticated MQTT, RF initialization, retained GPIO
 input state, BLE presence/discovery, local OTA, repeated warm boots, console
-paging, progressive GPIO/BLE pages and sustained mixed WebUI traffic. The new
-2+2 page loaded all four cards, and a 30-request mixed page run completed
-without an HTTP failure while MQTT stayed connected and the queue returned to
-zero. Physical output switching and restore behaviour still require validation
-with an attached load before `.39-test` is promoted to a stable release. A deliberately induced
-end-to-end broker outage/WOL cycle and a long-duration RF soak are still
-recommended for each deployment.
+paging, progressive GPIO/BLE pages and sustained mixed WebUI traffic. The 2+2
+page loaded all four cards, and a final 40-request mixed-page run completed
+without an HTTP failure while MQTT stayed connected. Output discovery, logical
+ON/OFF and restore-after-restart were verified without an attached load. A
+deliberately induced end-to-end broker outage/WOL cycle, an electrically loaded
+output test and a long-duration RF soak are still recommended for each
+deployment.

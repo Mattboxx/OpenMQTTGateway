@@ -757,12 +757,15 @@ String generateGPIOOutputStartupOptions(uint8_t selectedStartup) {
 String generateGPIOOutputChannelHtml(uint8_t channel) {
   String suffix = String(channel);
   const bool isOn = gpioOutputIsOn(channel);
+  const int electricalLevel = gpioOutputChannels[channel].enabled ? digitalRead(gpioOutputChannels[channel].pin) : LOW;
   String row;
   row.reserve(2400);
   row += "<section class='channel-card'><div class='channel-title'><b>Output " + String(channel + 1) +
          "</b><span class='status-chip " +
          (gpioOutputChannels[channel].enabled ? (isOn ? "active" : "idle") : "disabled") + "'>" +
-         (gpioOutputChannels[channel].enabled ? (isOn ? "ON" : "OFF") : "disabled") + "</span></div>";
+         (gpioOutputChannels[channel].enabled ? (String(isOn ? "ON" : "OFF") + " &middot; " +
+                                                  String(electricalLevel == HIGH ? "HIGH" : "LOW"))
+                                               : "disabled") + "</span></div>";
   row += "<label class='toggle-row'><input type='checkbox' name='oe" + suffix + "'" +
          (gpioOutputChannels[channel].enabled ? " checked" : "") + "><span>Enable this output and expose it to Home Assistant</span></label>";
   row += "<div class='form-grid'><p><b>Friendly name</b><small>Switch name in Home Assistant</small><input name='on" + suffix +

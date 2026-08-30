@@ -84,7 +84,9 @@ Each output has these independent settings:
 The safe default is push-pull, HIGH means ON and always OFF after boot. The
 firmware writes the inactive level before enabling the output direction to
 avoid a short activation pulse during startup. Home Assistant commands and
-state use separate per-channel topics:
+state use separate per-channel topics. The WebUI status chip shows both the
+logical state and actual electrical level (for example `ON · LOW` for an
+active-low output), making inverted wiring easier to verify:
 
 ```text
 home/OMG_multi_receiver/commands/MQTTtoGPIOOutput/1 {"state":"ON"}
