@@ -27,6 +27,9 @@
 #  include <SPIFFS.h>
 #  include <Update.h>
 #  include <WebServer.h> // Docs for this are here - https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer
+#  ifdef ZgatewayBLETracker
+#    include <esp_coexist.h>
+#  endif
 
 #  include "ArduinoLog.h"
 #  include "config_WebContent.h"
@@ -41,10 +44,74 @@
 #  endif
 
 uint32_t requestToken = 0;
+extern bool stateSnapshotOnly;
 
 QueueHandle_t webUIQueue;
 
-WebServer server(80);
+#  ifdef ZgatewayBLETracker
+extern bool pauseBLETrackerScanForWeb();
+extern void resumeBLETrackerScanAfterWeb();
+#  endif
+
+class BLEAwareWebServer : public WebServer {
+public:
+  explicit BLEAwareWebServer(uint16_t port) : WebServer(port) {}
+
+  void enableTcpNoDelay() {
+    _server.setNoDelay(true);
+  }
+
+  void handleClient() override {
+#  ifdef ZgatewayBLETracker
+    // The ESP32 uses one 2.4 GHz radio for Wi-Fi and BLE. Pause passive BLE
+    // scanning for the complete lifetime of an HTTP client, including the
+    // wait for request data and all response chunks. This prevents repeated
+    // WebUI requests from starving Wi-Fi long enough to miss AP beacons.
+    const bool clientPending = _currentStatus != HC_NONE || _server.hasClient();
+    if (clientPending) {
+      _bleResumeAfter = 0;
+      if (!_webRadioGuardActive) {
+        esp_err_t preferenceResult = esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+        if (preferenceResult != ESP_OK) {
+          Log.warning(F("[WebUI] unable to prefer WiFi during request error=%d" CR), preferenceResult);
+        }
+        _blePausedForRequest = pauseBLETrackerScanForWeb();
+        _webRadioGuardActive = true;
+      }
+    }
+#  endif
+
+    WebServer::handleClient();
+
+#  ifdef ZgatewayBLETracker
+    if (_webRadioGuardActive && _currentStatus == HC_NONE) {
+      // WiFiClient::write can return after the response has entered the TCP
+      // buffers but before every packet is transmitted. Keep BLE quiet during
+      // this drain interval, and extend it when another client arrives.
+      if (!_bleResumeAfter) _bleResumeAfter = millis() + 2000UL;
+      if ((int32_t)(millis() - _bleResumeAfter) >= 0) {
+        if (_blePausedForRequest) resumeBLETrackerScanAfterWeb();
+        esp_err_t preferenceResult = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        if (preferenceResult != ESP_OK) {
+          Log.warning(F("[WebUI] unable to restore balanced WiFi/BLE coexistence error=%d" CR), preferenceResult);
+        }
+        _blePausedForRequest = false;
+        _webRadioGuardActive = false;
+        _bleResumeAfter = 0;
+      }
+    }
+#  endif
+  }
+
+protected:
+#  ifdef ZgatewayBLETracker
+  bool _blePausedForRequest = false;
+  bool _webRadioGuardActive = false;
+  uint32_t _bleResumeAfter = 0;
+#  endif
+};
+
+BLEAwareWebServer server(80);
 
 /*------------------- External functions ----------------------*/
 extern void eraseConfig();
@@ -531,8 +598,9 @@ void handleWU() {
 }
 
 #if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
-String generateGPIOInputPinOptions(uint8_t selectedPin, uint8_t mode) {
-  String options;
+String generateGPIOInputPinData() {
+  String pins = "[";
+  bool first = true;
 #  if defined(ESP32)
   const int lastPin = 39;
 #  elif defined(ESP8266)
@@ -547,12 +615,12 @@ String generateGPIOInputPinOptions(uint8_t selectedPin, uint8_t mode) {
         supportedModes |= (1U << candidateMode);
     }
     if (!supportedModes) continue;
-    options += "<option value='" + String(pin) + "' data-modes='" + String(supportedModes) + "'";
-    if (pin == selectedPin) options += " selected";
-    if (!(supportedModes & (1U << mode))) options += " disabled";
-    options += ">GPIO " + String(pin) + "</option>";
+    if (!first) pins += ',';
+    pins += '[' + String(pin) + ',' + String(supportedModes) + ']';
+    first = false;
   }
-  return options;
+  pins += ']';
+  return pins;
 }
 
 String generateGPIOInputModeOptions(uint8_t selectedMode) {
@@ -580,6 +648,60 @@ String generateGPIOInputDeviceClassOptions(uint8_t selectedClass) {
     options += ">" + String(labels[deviceClass]) + "</option>";
   }
   return options;
+}
+
+String generateGPIOInputChannelHtml(uint8_t channel, int currentLevel) {
+  String suffix = String(channel);
+  const bool currentActive = gpioInputChannels[channel].enabled && currentLevel == gpioInputChannels[channel].activeLevel;
+  String row;
+  row.reserve(2600);
+  row += "<section class='channel-card'><div class='channel-title'><b>Input " + String(channel + 1) +
+         (channel == 0 ? " &middot; Primary" : "") + "</b><span class='status-chip " +
+         (gpioInputChannels[channel].enabled ? (currentActive ? "active" : "idle") : "disabled") + "'>" +
+         (gpioInputChannels[channel].enabled ? (String(currentLevel == HIGH ? "HIGH" : "LOW") +
+                                                (currentActive ? " &middot; ACTIVE" : " &middot; idle"))
+                                                 : "disabled") + "</span></div>";
+  row += "<label class='toggle-row'><input type='checkbox' name='ge" + suffix + "'" +
+         (gpioInputChannels[channel].enabled ? " checked" : "") + "><span>Enable this sensor</span></label>";
+  row += "<div class='form-grid'><p><b>Friendly name</b><small>Used by MQTT and Home Assistant</small><input name='gn" + suffix +
+         "' maxlength='" + String(GPIO_INPUT_NAME_SIZE - 1) + "' value='" +
+         HtmlEscape(String(gpioInputChannels[channel].name)) + "'></p>";
+  row += "<p><b>GPIO pin</b><small id='gpnote" + suffix + "'>Reserved or incompatible pins are hidden.</small><select id='gp" + suffix + "' name='gp" + suffix +
+         "' data-selected='" + String(gpioInputChannels[channel].pin) + "'></select></p>";
+  row += "<p><b>Electrical mode</b><small id='gh" + suffix + "' class='field-hint'></small><select id='gm" + suffix +
+         "' name='gm" + suffix + "' onchange='gih(" + suffix + ")'>" +
+         generateGPIOInputModeOptions(gpioInputChannels[channel].mode) + "</select></p>";
+  row += "<p><b>Active when</b><small>State reported as ON in Home Assistant</small><select name='ga" + suffix + "'><option value='1'" +
+         String(gpioInputChannels[channel].activeLevel == HIGH ? " selected" : "") + ">Signal is HIGH</option><option value='0'" +
+         String(gpioInputChannels[channel].activeLevel == LOW ? " selected" : "") + ">Signal is LOW</option></select></p>";
+  row += "<p><b>Debounce</b><small>Filters contact bounce and noisy transitions</small><span class='input-unit'><input name='gd" + suffix +
+         "' type='number' min='" + String(GPIO_INPUT_DEBOUNCE_MIN) + "' max='" + String(GPIO_INPUT_DEBOUNCE_MAX) +
+         "' value='" + String(gpioInputChannels[channel].debounceMs) + "'><span>ms</span></span></p>";
+  row += "<p><b>MQTT state memory</b><small>Keeps the latest valid state in the broker</small><label class='toggle-row'><input type='checkbox' name='gr" + suffix + "'" +
+         (gpioInputChannels[channel].retainState ? " checked" : "") + "><span>Retain last state</span></label></p>";
+  row += "<p><b>Home Assistant type</b><small>Controls icon and semantic display</small><select name='gc" + suffix + "'>" +
+         generateGPIOInputDeviceClassOptions(gpioInputChannels[channel].deviceClass) + "</select></p></div></section>";
+  return row;
+}
+
+void handleGIRow() {
+  WEBUI_SECURE
+  if (!server.hasArg("c")) {
+    server.send(400, "text/plain", "Missing GPIO input channel");
+    return;
+  }
+  String channelText = server.arg("c");
+  char* parseEnd = nullptr;
+  long channel = strtol(channelText.c_str(), &parseEnd, 10);
+  if (!channelText.length() || !parseEnd || *parseEnd != '\0' || channel < 0 || channel >= GPIO_INPUT_MAX) {
+    server.send(400, "text/plain", "Invalid GPIO input channel");
+    return;
+  }
+  const int currentLevel = gpioInputChannels[channel].enabled ? digitalRead(gpioInputChannels[channel].pin) : LOW;
+  String row = generateGPIOInputChannelHtml((uint8_t)channel, currentLevel);
+  Log.notice(F("[WebUI][GPIO] row channel=%u bytes=%u heap=%u" CR),
+             channel + 1, row.length(), ESP.getFreeHeap());
+  server.send(200, "text/html", row);
 }
 
 void handleGI() {
@@ -715,53 +837,96 @@ void handleGI() {
   serializeJson(modules, jsonChar, measureJson(modules) + 1);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure GPIO inputs").c_str());
-  String response = String(buffer) + String(script) + String(style);
-  response += "<script>function gih(i){var m=document.getElementById('gm'+i).value,h=document.getElementById('gh'+i),p=document.getElementById('gp'+i),moved=false,bit=1<<Number(m);h.textContent=m==='1'?'Connect the contact between GPIO and GND. Open is normally HIGH.':m==='2'?'Connect the contact between GPIO and 3.3 V. Open is normally LOW.':'Use for a driven 0-3.3 V output or an external pull resistor.';for(var o of p.options)o.disabled=!(Number(o.dataset.modes)&bit);if(p.selectedOptions[0]&&p.selectedOptions[0].disabled){for(var o of p.options)if(!o.disabled){o.selected=true;moved=true;break;}}document.getElementById('gpnote'+i).textContent=moved?'Pin changed automatically: the previous GPIO does not support this mode.':'Reserved or incompatible pins are hidden.';}window.addEventListener('load',function(){for(var i=0;i<" + String(GPIO_INPUT_MAX) + ";i++)gih(i);});</script>";
+  String pageHeader = String(buffer);
+  String gpioScript = "<script>var gpp=" + generateGPIOInputPinData() + ";function gip(i){var p=document.getElementById('gp'+i),s=Number(p.dataset.selected);for(var e of gpp){var o=document.createElement('option');o.value=e[0];o.dataset.modes=e[1];o.textContent='GPIO '+e[0];if(e[0]===s)o.selected=true;p.appendChild(o);}}function gih(i){var m=document.getElementById('gm'+i).value,h=document.getElementById('gh'+i),p=document.getElementById('gp'+i),moved=false,bit=1<<Number(m);h.textContent=m==='1'?'Connect the contact between GPIO and GND. Open is normally HIGH.':m==='2'?'Connect the contact between GPIO and 3.3 V. Open is normally LOW.':'Use for a driven 0-3.3 V output or an external pull resistor.';for(var o of p.options)o.disabled=!(Number(o.dataset.modes)&bit);if(p.selectedOptions[0]&&p.selectedOptions[0].disabled){for(var o of p.options)if(!o.disabled){o.selected=true;moved=true;break;}}document.getElementById('gpnote'+i).textContent=moved?'Pin changed automatically: the previous GPIO does not support this mode.':'Reserved or incompatible pins are hidden.';}async function gil(){var d=document.getElementById('grows');d.innerHTML='';try{for(var i=0;i<" + String(GPIO_INPUT_MAX) + ";i++){var r=await fetch('gi-row?c='+i,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);d.insertAdjacentHTML('beforeend',await r.text());gip(i);gih(i);}}catch(e){d.innerHTML=\"<div class='info-box'>Unable to load GPIO settings: \"+e.message+\". Reload this page.</div>\";}}window.addEventListener('load',gil);</script>";
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, body_header, jsonChar, gateway_name);
-  response += String(buffer);
-  response += "<fieldset class='set1'><legend><span><b>GPIO input sensors</b></span></legend>";
-  response += "<form method='post' action='gi'><div class='info-box'><b>Independent digital sensors</b><br>Enable up to " + String(GPIO_INPUT_MAX) +
-              " inputs. The primary input keeps the existing MQTT and Home Assistant identity. For opening, door, garage-door and window types, Active must be the electrical level that means open. Changes are validated and applied after restart.</div>";
-  for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
-    String suffix = String(channel);
-    const int currentLevel = gpioInputChannels[channel].enabled ? digitalRead(gpioInputChannels[channel].pin) : LOW;
-    const bool currentActive = gpioInputChannels[channel].enabled && currentLevel == gpioInputChannels[channel].activeLevel;
-    response += "<section class='channel-card'><div class='channel-title'><b>Input " + String(channel + 1) +
-                (channel == 0 ? " &middot; Primary" : "") + "</b><span class='status-chip " +
-                (gpioInputChannels[channel].enabled ? (currentActive ? "active" : "idle") : "disabled") + "'>" +
-                (gpioInputChannels[channel].enabled ? (String(currentLevel == HIGH ? "HIGH" : "LOW") +
-                                                       (currentActive ? " &middot; ACTIVE" : " &middot; idle"))
-                                                        : "disabled") + "</span></div>";
-    response += "<label class='toggle-row'><input type='checkbox' name='ge" + suffix + "'" +
-                (gpioInputChannels[channel].enabled ? " checked" : "") + "><span>Enable this sensor</span></label>";
-    response += "<div class='form-grid'><p><b>Friendly name</b><small>Used by MQTT and Home Assistant</small><input name='gn" + suffix +
-                "' maxlength='" + String(GPIO_INPUT_NAME_SIZE - 1) + "' value='" +
-                HtmlEscape(String(gpioInputChannels[channel].name)) + "'></p>";
-    response += "<p><b>GPIO pin</b><small id='gpnote" + suffix + "'>Reserved or incompatible pins are hidden.</small><select id='gp" + suffix + "' name='gp" + suffix + "'>" +
-                generateGPIOInputPinOptions(gpioInputChannels[channel].pin, gpioInputChannels[channel].mode) + "</select></p>";
-    response += "<p><b>Electrical mode</b><small id='gh" + suffix + "' class='field-hint'></small><select id='gm" + suffix +
-                "' name='gm" + suffix + "' onchange='gih(" + suffix + ")'>" +
-                generateGPIOInputModeOptions(gpioInputChannels[channel].mode) + "</select></p>";
-    response += "<p><b>Active when</b><small>State reported as ON in Home Assistant</small><select name='ga" + suffix + "'><option value='1'" +
-                String(gpioInputChannels[channel].activeLevel == HIGH ? " selected" : "") + ">Signal is HIGH</option><option value='0'" +
-                String(gpioInputChannels[channel].activeLevel == LOW ? " selected" : "") + ">Signal is LOW</option></select></p>";
-    response += "<p><b>Debounce</b><small>Filters contact bounce and noisy transitions</small><span class='input-unit'><input name='gd" + suffix +
-                "' type='number' min='" + String(GPIO_INPUT_DEBOUNCE_MIN) + "' max='" + String(GPIO_INPUT_DEBOUNCE_MAX) +
-                "' value='" + String(gpioInputChannels[channel].debounceMs) + "'><span>ms</span></span></p>";
-    response += "<p><b>MQTT state memory</b><small>Keeps the latest valid state in the broker</small><label class='toggle-row'><input type='checkbox' name='gr" + suffix + "'" +
-                (gpioInputChannels[channel].retainState ? " checked" : "") + "><span>Retain last state</span></label></p>";
-    response += "<p><b>Home Assistant type</b><small>Controls icon and semantic display</small><select name='gc" + suffix + "'>" +
-                generateGPIOInputDeviceClassOptions(gpioInputChannels[channel].deviceClass) + "</select></p></div></section>";
-  }
-  response += "<br><button name='save' type='submit' class='button bgrn'>Save and restart</button></form></fieldset>";
-  response += String(body_footer_config_menu);
+  String bodyHeader = String(buffer);
+  static const char gpioFieldset[] PROGMEM = "<fieldset class='set1'><legend><span><b>GPIO input sensors</b></span></legend>";
+  String intro = "<form method='post' action='gi'><div class='info-box'><b>Independent digital sensors</b><br>Enable up to " + String(GPIO_INPUT_MAX) +
+                 " inputs. The primary input keeps the existing MQTT and Home Assistant identity. For opening, door, garage-door and window types, Active must be the electrical level that means open. Changes are validated and applied after restart.</div><div id='grows'><div class='info-box'>Loading sensor settings...</div></div>";
+  static const char gpioSaveButton[] PROGMEM = "<br><button name='save' type='submit' class='button bgrn'>Save and restart</button></form></fieldset>";
+  static const char gpioFooterMenu[] PROGMEM = body_footer_config_menu;
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
-  response += String(buffer);
-  server.send(200, "text/html", response);
+  String pageFooter = String(buffer);
+
+  size_t contentLength = pageHeader.length() + strlen_P(script) + strlen_P(style) + gpioScript.length() +
+                         bodyHeader.length() + strlen_P(gpioFieldset) + intro.length() +
+                         strlen_P(gpioSaveButton) + strlen_P(gpioFooterMenu) + pageFooter.length();
+
+  Log.notice(F("[WebUI][GPIO] response bytes=%u heap=%u max_alloc=%u" CR),
+             contentLength, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  server.setContentLength(contentLength);
+  server.send(200, "text/html", "");
+  server.sendContent(pageHeader);
+  server.sendContent_P(script);
+  server.sendContent_P(style);
+  server.sendContent(gpioScript);
+  server.sendContent(bodyHeader);
+  server.sendContent_P(gpioFieldset);
+  server.sendContent(intro);
+  server.sendContent_P(gpioSaveButton);
+  server.sendContent_P(gpioFooterMenu);
+  server.sendContent(pageFooter);
 }
 #endif
 
-#ifdef ZgatewayBT
+#if defined(ZgatewayBT) || defined(ZgatewayBLETracker)
+String generateBLETrackerRowHtml(uint8_t slot) {
+  BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
+  String suffix = String(slot);
+  String status = !tracker.enabled ? "disabled" : (tracker.present ? "present" : "away");
+  String chipClass = !tracker.enabled ? "" : (tracker.present ? "active" : "idle");
+  String row;
+  row.reserve(1536);
+  row += "<section class='channel-card'><div class='channel-title'><b>BLE device " + String(slot + 1) +
+         "</b><span class='status-chip " + chipClass + "'>" + status + "</span></div>";
+  row += "<label class='toggle-row'><input type='checkbox' name='be" + suffix + "'" +
+         String(tracker.enabled ? " checked" : "") + "><span>Expose this device in Home Assistant</span></label>";
+  row += "<div class='form-grid'><p><b>Friendly name</b><small>Shown in Home Assistant</small><input name='bn" + suffix +
+         "' maxlength='32' value='" + HtmlEscape(String(tracker.name)) + "' placeholder='Keys, phone, beacon...'></p>";
+  row += "<p><b>BLE MAC address</b><small>Choose a suggestion or enter a fixed MAC</small><input name='bm" + suffix +
+         "' list='ble-candidates' maxlength='17' pattern='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' value='" +
+         HtmlEscape(String(tracker.mac)) + "' placeholder='AA:BB:CC:DD:EE:FF'></p>";
+  row += "<p><b>Away timeout</b><small>Time without advertisements before reporting away</small><span class='input-unit'><input name='bt" + suffix +
+         "' type='number' min='5' max='86400' value='" + String(tracker.timeoutSeconds) + "'><span>s</span></span></p>";
+  row += "<p><b>Minimum signal</b><small>Ignore detections weaker than this threshold</small><span class='input-unit'><input name='br" + suffix +
+         "' type='number' min='-100' max='-20' value='" + String(tracker.minRssi) + "'><span>dBm</span></span></p></div>";
+  if (tracker.enabled && tracker.present && tracker.lastRssi > -127) {
+    row += "<small>Last RSSI: " + String(tracker.lastRssi) + " dBm &middot; last seen at uptime " + String(tracker.lastSeen / 1000UL) + " s</small>";
+  } else if (tracker.enabled) {
+    row += "<small>Not currently detected</small>";
+  }
+  row += "</section>";
+  return row;
+}
+
+void handleBTRow() {
+  WEBUI_SECURE
+  if (!server.hasArg("c")) {
+    server.send(400, "text/plain", "Missing BLE slot");
+    return;
+  }
+  int slot = server.arg("c").toInt();
+  if (slot < 0 || slot >= BLE_TRACKER_MAX) {
+    server.send(400, "text/plain", "Invalid BLE slot");
+    return;
+  }
+  String row = generateBLETrackerRowHtml(slot);
+  Log.verbose(F("[WebUI][BLE] row=%u bytes=%u heap=%u max_alloc=%u" CR),
+             slot + 1, row.length(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  server.setContentLength(row.length());
+  server.send(200, "text/html", row);
+}
+
+void handleBTCandidates() {
+  WEBUI_SECURE
+  String candidates = getBLETrackerCandidatesHtml();
+  Log.verbose(F("[WebUI][BLE] candidates bytes=%u heap=%u max_alloc=%u" CR),
+             candidates.length(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  server.setContentLength(candidates.length());
+  server.send(200, "text/html", candidates);
+}
+
 void handleBTTrackers() {
   WEBUI_TRACE_LOG(F("handleBTTrackers: uri: %s, args: %d, method: %d" CR), server.uri(), server.args(), server.method());
   WEBUI_SECURE
@@ -822,50 +987,47 @@ void handleBTTrackers() {
     saveBLETrackerConfig();
     launchBTDiscovery(false);
     notice = "<div class='info-box'><b>Saved.</b> No restart is required. Home Assistant discovery and retained presence states have been refreshed.</div>";
-    Log.notice(F("[WebUI][BLE] tracker configuration saved" CR));
+    Log.verbose(F("[WebUI][BLE] tracker configuration saved" CR));
   }
 
   char jsonChar[100];
   serializeJson(modules, jsonChar, measureJson(modules) + 1);
-  char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - BLE presence").c_str());
-  String response = String(buffer) + String(script) + String(style);
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, body_header, jsonChar, gateway_name);
-  response += String(buffer);
-  response += "<fieldset class='set1'><legend><span><b>BLE presence in Home Assistant</b></span></legend>";
-  response += notice;
-  response += "<div class='info-box'>Enable only the devices you want to expose. Each slot creates a presence binary sensor and an RSSI sensor in Home Assistant. The presence changes to away after the timeout.</div>";
-  response += "<div class='info-box'><b>Nearby devices:</b> MAC addresses already seen appear as suggestions while typing. A device that randomizes its BLE MAC cannot be followed reliably by MAC.</div>";
-  response += "<form method='post' action='bt'><datalist id='ble-candidates'>" + getBLETrackerCandidatesHtml() + "</datalist>";
+  // These formatted fragments are below 768 bytes. Keeping the general 3 KB
+  // WebUI buffer on this handler's stack leaves too little stack headroom.
+  constexpr size_t BLE_WEB_FRAGMENT_BUFFER_SIZE = 768;
+  char buffer[BLE_WEB_FRAGMENT_BUFFER_SIZE];
+  const uint32_t heapBeforePage = ESP.getFreeHeap();
+  snprintf(buffer, sizeof(buffer), header_html, (String(gateway_name) + " - BLE presence").c_str());
+  String pageHeader = String(buffer);
+  String btScript = "<script>async function btl(){var d=document.getElementById('brows');d.innerHTML='';try{var c=await fetch('bt-candidates',{cache:'no-store'});if(c.ok)document.getElementById('ble-candidates').innerHTML=await c.text();for(var i=0;i<" + String(BLE_TRACKER_MAX) + ";i++){var r=await fetch('bt-row?c='+i,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);d.insertAdjacentHTML('beforeend',await r.text());}}catch(e){d.innerHTML=\"<div class='info-box'>Unable to load BLE settings: \"+e.message+\". Reload this page.</div>\";}}window.addEventListener('load',btl);</script>";
+  snprintf(buffer, sizeof(buffer), body_header, jsonChar, gateway_name);
+  String bodyHeader = String(buffer);
+  static const char btFieldset[] PROGMEM = "<fieldset class='set1'><legend><span><b>BLE presence in Home Assistant</b></span></legend>";
+  String intro = notice + "<div class='info-box'>Enable only the devices you want to expose. Each slot creates a presence binary sensor and an RSSI sensor in Home Assistant. The presence changes to away after the timeout.</div><div class='info-box'><b>Nearby devices:</b> MAC addresses already seen appear as suggestions while typing. A device that randomizes its BLE MAC cannot be followed reliably by MAC.</div><form method='post' action='bt'><datalist id='ble-candidates'></datalist><div id='brows'><div class='info-box'>Loading BLE settings...</div></div>";
+  static const char btSaveButton[] PROGMEM = "<br><button name='save' type='submit' class='button bgrn'>Save BLE devices</button></form></fieldset>";
+  static const char btFooterMenu[] PROGMEM = body_footer_config_menu;
+  snprintf(buffer, sizeof(buffer), footer, OMG_VERSION);
+  String pageFooter = String(buffer);
 
-  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
-    BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
-    String suffix = String(slot);
-    String status = !tracker.enabled ? "disabled" : (tracker.present ? "present" : "away");
-    String chipClass = !tracker.enabled ? "" : (tracker.present ? "active" : "idle");
-    response += "<section class='channel-card'><div class='channel-title'><b>BLE device " + String(slot + 1) +
-                "</b><span class='status-chip " + chipClass + "'>" + status + "</span></div>";
-    response += "<label class='toggle-row'><input type='checkbox' name='be" + suffix + "'" +
-                String(tracker.enabled ? " checked" : "") + "><span>Expose this device in Home Assistant</span></label>";
-    response += "<div class='form-grid'><p><b>Friendly name</b><small>Shown in Home Assistant</small><input name='bn" + suffix +
-                "' maxlength='32' value='" + HtmlEscape(String(tracker.name)) + "' placeholder='Keys, phone, beacon...'></p>";
-    response += "<p><b>BLE MAC address</b><small>Choose a suggestion or enter a fixed MAC</small><input name='bm" + suffix +
-                "' list='ble-candidates' maxlength='17' pattern='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' value='" +
-                HtmlEscape(String(tracker.mac)) + "' placeholder='AA:BB:CC:DD:EE:FF'></p>";
-    response += "<p><b>Away timeout</b><small>Time without advertisements before reporting away</small><span class='input-unit'><input name='bt" + suffix +
-                "' type='number' min='5' max='86400' value='" + String(tracker.timeoutSeconds) + "'><span>s</span></span></p>";
-    response += "<p><b>Minimum signal</b><small>Ignore detections weaker than this threshold</small><span class='input-unit'><input name='br" + suffix +
-                "' type='number' min='-100' max='-20' value='" + String(tracker.minRssi) + "'><span>dBm</span></span></p></div>";
-    if (tracker.enabled) {
-      response += "<small>Last RSSI: " + String(tracker.lastRssi) + " dBm &middot; last seen at uptime " + String(tracker.lastSeen / 1000UL) + " s</small>";
-    }
-    response += "</section>";
-  }
-  response += "<br><button name='save' type='submit' class='button bgrn'>Save BLE devices</button></form></fieldset>";
-  response += String(body_footer_config_menu);
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
-  response += String(buffer);
-  server.send(200, "text/html", response);
+  size_t contentLength = pageHeader.length() + strlen_P(script) + strlen_P(style) + btScript.length() +
+                         bodyHeader.length() + strlen_P(btFieldset) + intro.length() +
+                         strlen_P(btSaveButton) + strlen_P(btFooterMenu) + pageFooter.length();
+
+  server.setContentLength(contentLength);
+  server.send(200, "text/html", "");
+  server.sendContent(pageHeader);
+  server.sendContent_P(script);
+  server.sendContent_P(style);
+  server.sendContent(btScript);
+  server.sendContent(bodyHeader);
+  server.sendContent_P(btFieldset);
+  server.sendContent(intro);
+  server.sendContent_P(btSaveButton);
+  server.sendContent_P(btFooterMenu);
+  server.sendContent(pageFooter);
+
+  Log.verbose(F("[WebUI][BLE] shell bytes=%u heap_before=%u heap_after=%u min_heap=%u max_alloc=%u" CR),
+             contentLength, heapBeforePage, ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
 }
 #endif
 
@@ -1784,10 +1946,14 @@ void handleIN() {
     char jsonChar[100];
     serializeJson(modules, jsonChar, measureJson(modules) + 1);
 
+    stateSnapshotOnly = true;
     String informationDisplay = stateMeasures(); // .replace(",\"", "}1");  // .replace("\":", "=2")
 
 // }1 json-oled }2 true } }1 Cloud }2 cloudEnabled}2true}1c
-#  if defined(ZgatewayBT)
+#  if defined(ZgatewayBLETracker)
+    informationDisplay += "1<BR>BLE observer}2}1";
+    informationDisplay += stateBLETrackerMeasures();
+#  elif defined(ZgatewayBT)
     informationDisplay += "1<BR>BT}2}1"; // }1 the bracket is not needed as the previous message ends with }
     informationDisplay += stateBTMeasures(false);
 #  endif
@@ -1809,6 +1975,7 @@ void handleIN() {
 #  endif
     informationDisplay += "1<BR>WebUI}2}1";
     informationDisplay += stateWebUIStatus();
+    stateSnapshotOnly = false;
 
     // stateBTMeasures causes a Stack canary watchpoint triggered (loopTask)
     // WEBUI_TRACE_LOG(F("[WebUI] informationDisplay before %s" CR), informationDisplay.c_str());
@@ -1857,10 +2024,21 @@ void handleFavicon() {
   server.send_P(200, "image/x-icon", reinterpret_cast<const char*>(Openmqttgateway_logo_mini_ico), sizeof(Openmqttgateway_logo_mini_ico));
 }
 
+void handleUIStyle() {
+  static constexpr size_t stylePrefixLength = sizeof("<style>") - 1;
+  static constexpr size_t styleSuffixLength = sizeof("</style></head>") - 1;
+  static constexpr size_t cssLength = sizeof(inline_ui_style) - 1 - stylePrefixLength - styleSuffixLength;
+  server.sendHeader("Cache-Control", "public, max-age=86400");
+  server.setContentLength(cssLength);
+  server.send(200, "text/css", "");
+  server.sendContent(inline_ui_style + stylePrefixLength, cssLength);
+}
+
 #  if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
 bool localFirmwareUploadAuthorized = false;
 bool localFirmwareUploadStarted = false;
 bool localFirmwareUploadSuccess = false;
+bool localFirmwareUploadRequiresRestart = false;
 size_t localFirmwareUploadBytes = 0;
 size_t localFirmwareNextProgressLog = 0;
 String localFirmwareUploadError;
@@ -1877,6 +2055,7 @@ void handleLocalFirmwareUpload() {
     localFirmwareUploadAuthorized = !webUISecure || server.authenticate(www_username, ota_pass);
     localFirmwareUploadStarted = false;
     localFirmwareUploadSuccess = false;
+    localFirmwareUploadRequiresRestart = false;
     localFirmwareUploadBytes = 0;
     localFirmwareNextProgressLog = 256U * 1024U;
     localFirmwareUploadError = "";
@@ -1894,10 +2073,20 @@ void handleLocalFirmwareUpload() {
       return;
     }
 
+#    ifdef ZgatewayBLETracker
+    if (isBLETrackerStarting()) {
+      setLocalFirmwareUploadError("BLE radio is starting; wait a few seconds and retry the upload");
+      return;
+    }
+#    endif
+
     ProcessLock = true;
 #    ifdef ZgatewayBT
     stopProcessing(true);
+#    elif defined(ZgatewayBLETracker)
+    stopBLETracker(true);
 #    endif
+    localFirmwareUploadRequiresRestart = true;
     gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
     last_ota_activity_millis = millis();
     lpDisplayPrint("Web OTA in progress");
@@ -1978,10 +2167,13 @@ void handleLocalFirmwareUploadFinished() {
   response += String(buffer);
   server.send(localFirmwareUploadSuccess ? 200 : 500, "text/html", response);
 
-  Log.notice(F("[WebUI][OTA] local upload request complete success=%T bytes=%u; restarting" CR),
-             localFirmwareUploadSuccess, localFirmwareUploadBytes);
-  delay(2000);
-  ESPRestart(6);
+  Log.notice(F("[WebUI][OTA] local upload request complete success=%T bytes=%u restart_required=%T" CR),
+             localFirmwareUploadSuccess, localFirmwareUploadBytes,
+             localFirmwareUploadSuccess || localFirmwareUploadRequiresRestart);
+  if (localFirmwareUploadSuccess || localFirmwareUploadRequiresRestart) {
+    delay(2000);
+    ESPRestart(6);
+  }
 }
 
 /**
@@ -2095,26 +2287,44 @@ void handleCS() {
     }
 
     uint32_t index = server.arg("c2").toInt();
-
-    String message = String(log_buffer_pointer) + "}1" + String(reset_web_log_flag) + "}1";
-    if (!reset_web_log_flag) {
+    const bool consoleWasInitialized = reset_web_log_flag;
+    if (!consoleWasInitialized) {
       index = 0;
       reset_web_log_flag = true;
     }
 
+    // A full console buffer is about 6 KB. On memory-constrained ESP32 builds,
+    // sending it in one response can monopolize the single HTTP client if the
+    // Wi-Fi link stalls. Page the log without splitting entries; the returned
+    // index points to the first entry not yet delivered, so the existing UI
+    // automatically requests the next page without losing messages.
+    constexpr size_t CONSOLE_RESPONSE_PAYLOAD_MAX = 1800;
+    String payload;
+    payload.reserve(CONSOLE_RESPONSE_PAYLOAD_MAX + 1);
+    uint32_t responseIndex = index ? index : log_buffer_pointer;
     bool cflg = (index);
     char* line;
     size_t len;
     while (GetLog(1, &index, &line, &len)) {
-      if (cflg) {
-        message += "\n";
+      size_t lineLength = len > 0 ? len - 1 : 0;
+      size_t required = lineLength + (cflg ? 1 : 0);
+      if (payload.length() && payload.length() + required > CONSOLE_RESPONSE_PAYLOAD_MAX) {
+        break;
       }
-      for (int x = 0; x < len - 1; x++) {
-        message += line[x];
+      if (cflg) {
+        payload += "\n";
+      }
+      for (size_t x = 0; x < lineLength; x++) {
+        payload += line[x];
       }
       cflg = true;
+      responseIndex = index;
     }
+    String message = String(responseIndex) + "}1" + String(consoleWasInitialized) + "}1";
+    message += payload;
     message += "}1";
+    WEBUI_TRACE_LOG(F("[WebUI][Console] response bytes=%u next_index=%u heap=%u" CR),
+                    message.length(), responseIndex, ESP.getFreeHeap());
     server.send(200, "text/plain", message);
   } else {
     char jsonChar[100];
@@ -2199,9 +2409,12 @@ void WebUISetup() {
   server.on("/wu", handleWU); // Configure WebUI
 #  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
   server.on("/gi", handleGI); // Configure GPIO input sensors
+  server.on("/gi-row", handleGIRow); // Progressive GPIO channel fragment
 #  endif
-#  ifdef ZgatewayBT
+#  if defined(ZgatewayBT) || defined(ZgatewayBLETracker)
   server.on("/bt", handleBTTrackers); // Configure selected BLE presence devices
+  server.on("/bt-row", handleBTRow); // Progressive BLE tracker fragment
+  server.on("/bt-candidates", handleBTCandidates); // Progressive BLE candidate suggestions
 #  endif
 #  ifdef ZgatewayLORA
   server.on("/la", handleLA); // Configure LORA
@@ -2215,8 +2428,11 @@ void WebUISetup() {
   server.on("/lo", handleLO); // Configure Logging
 
   server.on("/rt", handleRT); // Reset configuration ( Erase and Restart )
+  server.on("/ui.css", handleUIStyle); // Shared, cacheable WebUI stylesheet
   server.on("/favicon.ico", handleFavicon); // Information
   server.begin();
+  server.enableTcpNoDelay();
+  Log.notice(F("[WebUI] TCP_NODELAY enabled" CR));
 
   Log.begin(LOG_LEVEL, &WebLog);
 
@@ -2302,7 +2518,7 @@ String stateWebUIStatus() {
 
   // WebUIdata["currentMessage"] = currentWebUIMessage;
   WebUIdata["origin"] = subjectWebUItoMQTT;
-  enqueueJsonObject(WebUIdata);
+  if (!stateSnapshotOnly) enqueueJsonObject(WebUIdata);
   return output;
 }
 

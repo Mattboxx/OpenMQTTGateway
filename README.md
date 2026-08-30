@@ -21,7 +21,7 @@ useful when the gateway is installed away from the MQTT/Home Assistant server.
 | GPIO safety | Generic board-level validation | The supplied CC1101 preset exposes only pins that do not collide with flash, SPI, CC1101 or ESP32 boot-strapping duties |
 | BLE presence | BLE presets normally publish/ decode the devices they hear | Up to four fixed-MAC BLE devices selected in the Web UI; each gets a retained Home Assistant presence entity plus RSSI, its own away timeout and minimum-signal threshold |
 | MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, predictable DHCP/mDNS hostname, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
-| Diagnostics | General OpenMQTTGateway logs | Stable `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][TRACKER]`, `[BLE][SCAN]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context |
+| Diagnostics | General OpenMQTTGateway logs | Stable `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][ADV]`, `[MEM]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context |
 | Web interface | Original compact Web UI | Responsive card layout, live GPIO/BLE state, nearby-BLE suggestions, contextual wiring hints and local `.bin` OTA upload for future custom updates |
 
 The WOL logic deliberately does not send a magic packet after every ordinary
@@ -33,10 +33,12 @@ WOL packets and timers that did not reset correctly.
 Typical uses include a garage, gate, shed or equipment cabinet where one ESP32
 must receive RF devices, expose door/contact and selected BLE presence sensors
 to Home Assistant and wake the machine hosting MQTT when it is genuinely
-unavailable. BLE scanning is passive and intermittent to reduce contention with
-the ESP32 WiFi radio. This preset intentionally tracks selected devices rather
-than embedding the full Theengs decoder, because CC1101 + RTL_433 + the full BLE
-decoder does not fit the 4 MB board's dual-slot Web-OTA partition.
+unavailable. BLE scanning is passive and duty-limited to reduce contention with
+the ESP32 WiFi radio. A controller-only VHCI observer avoids the NimBLE/Bluedroid
+host, connections, GATT and decoder tasks. This preset intentionally tracks
+selected devices rather than embedding the full Theengs decoder, because
+CC1101 + RTL_433 + the full BLE pipeline leaves too little memory for reliable
+operation on this 4 MB ESP32.
 
 Configure BLE from **Device configuration → BLE presence devices**. Wait for a
 scan, choose one of the recently seen MAC suggestions (or type a fixed MAC),
@@ -48,7 +50,14 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
-* [Custom prerelease firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.9)
+* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.32)
+
+## Firmware variants
+
+| Variant | Intended use |
+| --- | --- |
+| `v1.8.1-wol-gpio.8` | Conservatively retained stable fallback with WOL and configurable GPIO inputs, but no BLE observer. Its application image and complete USB recovery bundle remain under `recovery/v1.8.1-wol-gpio.8`. |
+| `v1.8.1-wol-gpio.32` | Current RF + GPIO + WOL build with selected-device BLE presence, local OTA, progressive WebUI pages, queue back-pressure and BLE/WiFi recovery safeguards. |
 
 Build the dedicated preset with:
 
@@ -58,8 +67,9 @@ platformio run -e esp32dev-multi_receiver-wol-gpio
 
 The custom preset is intentionally opt-in. All upstream environments remain
 available, and changes that are not relevant to them stay behind build flags.
-The downloadable firmware is a prerelease: verify wiring and GPIO choices
-before relying on it in an unattended installation.
+The supplied binary was validated on the hardware described below. Verify your
+own wiring, GPIO choices, broker and RF configuration before relying on it in
+an unattended installation.
 
 ---
 

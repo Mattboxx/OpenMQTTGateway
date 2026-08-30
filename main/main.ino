@@ -42,6 +42,9 @@ enum GatewayState {
   ERROR
 };
 GatewayState gatewayState = GatewayState::WAITING_ONBOARDING;
+// Web information pages need a snapshot, not another round of retained MQTT
+// publications. This flag is only changed and consumed by the Arduino loop.
+bool stateSnapshotOnly = false;
 
 // Macros and structure to enable the duplicates removing on the following gateways
 #if defined(ZgatewayRF) || defined(ZgatewayIR) || defined(ZgatewaySRFB) || defined(ZgatewayWeatherStation) || defined(ZgatewayRTL_433)
@@ -148,6 +151,9 @@ struct GfSun2000Data {};
 #ifdef ZgatewayBT
 #  include "config_BT.h"
 #endif
+// Included for Arduino's generated prototypes even when the optional module is
+// disabled; the header only contains the lightweight tracker data contract.
+#include "config_BLETracker.h"
 #ifdef ZgatewayIR
 #  include "config_IR.h"
 #endif
@@ -369,7 +375,7 @@ void handle_autodiscovery() {
 #  ifdef ZgatewayLORA
     launchLORADiscovery(true);
 #  endif
-#  ifdef ZgatewayBT
+#  if defined(ZgatewayBT) || defined(ZgatewayBLETracker)
     launchBTDiscovery(true);
 #  endif
 #  ifdef ZgatewayRTL_433
@@ -651,7 +657,19 @@ void emptyQueue() {
   }
   Log.trace(F("Dequeue JSON" CR));
   DynamicJsonDocument jsonBuffer(JSON_MSG_BUFFER_MAX);
-  JsonObject obj = jsonBuffer.to<JsonObject>();
+  if (jsonBuffer.capacity() < JSON_MSG_BUFFER_MAX) {
+    // Web responses and radio callbacks can temporarily fragment the heap.
+    // Keep the queued payload intact and retry after those allocations are
+    // released; dropping it here can lose HA discovery or retained states.
+    static uint32_t lastQueueAllocationWarning = 0;
+    if (!lastQueueAllocationWarning || millis() - lastQueueAllocationWarning >= 5000UL) {
+      lastQueueAllocationWarning = millis();
+      Log.warning(F("[QUEUE] JSON allocation deferred requested=%u capacity=%u current=%d heap=%u max_alloc=%u" CR),
+                  JSON_MSG_BUFFER_MAX, jsonBuffer.capacity(), queueLength,
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    }
+    return;
+  }
   size_t queuedPayloadBytes = 0;
 #ifdef ESP32
   if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(QueueSemaphoreTimeOutTask)) == pdFALSE) {
@@ -672,6 +690,7 @@ void emptyQueue() {
               error.c_str(), queuedPayloadBytes, jsonBuffer.capacity(), ESP.getFreeHeap());
     gatewayState = GatewayState::ERROR;
   } else {
+    JsonObject obj = jsonBuffer.as<JsonObject>();
     if (jsonDispatch(obj))
       queueLengthSum++;
   }
@@ -1673,6 +1692,12 @@ void setup() {
   xTaskCreate(updateAndHandleLEDsTask, "updateAndHandleLEDsTask", 2500, NULL, 1, NULL);
   xQueueMutex = xSemaphoreCreateMutex();
   xMqttMutex = xSemaphoreCreateMutex();
+#  ifdef ZgatewayBLETracker
+  // Reserve and initialize the shared Bluetooth controller before WiFi and
+  // the memory-heavy RF decoder tasks fragment the heap.
+  setupBLETracker();
+  modules.add(ZgatewayBLETracker);
+#  endif
 #  if defined(ZboardM5STICKC) || defined(ZboardM5STICKCP) || defined(ZboardM5STACK) || defined(ZboardM5TOUGH)
   setupM5();
 #  endif
@@ -2003,6 +2028,8 @@ void setOTA() {
     ProcessLock = true;
 #  ifdef ZgatewayBT
     stopProcessing(true);
+#  elif defined(ZgatewayBLETracker)
+    stopBLETracker(true);
 #  endif
 #endif
     lpDisplayPrint("OTA in progress");
@@ -2668,10 +2695,13 @@ void setupWiFiManager() {
     WiFi.onEvent(WiFiDiagnosticEvent);
     wifiDiagnosticsRegistered = true;
   }
-  // Explicit OFF -> STA transition gives warm reboots the same clean radio
-  // initialization path as a cold power-up without erasing saved credentials.
+  // A forced OFF -> STA cycle leaves the ESP32 coexistence controller in an
+  // invalid state when BLE is enabled later in setup. A real restart already
+  // resets the radio, so BLE builds must start STA directly.
+#    if !defined(ZgatewayBT) && !defined(ZgatewayBLETracker)
   WiFi.mode(WIFI_OFF);
   delay(100);
+#    endif
 #  endif
   WiFi.mode(WIFI_STA);
 #  ifdef ESP32
@@ -2682,7 +2712,7 @@ void setupWiFiManager() {
                networkHostname, networkHostname, networkHostname);
   }
   WiFi.setAutoReconnect(true);
-#    if defined(WIFI_DISABLE_POWER_SAVE) && WIFI_DISABLE_POWER_SAVE
+#    if defined(WIFI_DISABLE_POWER_SAVE) && WIFI_DISABLE_POWER_SAVE && !defined(ZgatewayBT) && !defined(ZgatewayBLETracker)
   WiFi.setSleep(false);
 #    endif
 #  endif
@@ -3116,8 +3146,10 @@ void loop() {
       TheengsUtils::syncNTP();
 #endif
       if (!timer_sys_checks) { // Update check at start up only
-#if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
+#if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE) && OTA_STARTUP_UPDATE_CHECK
         checkForUpdates();
+#elif defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
+        Log.notice(F("[OTA] automatic startup update check disabled; web and MQTT updates remain available" CR));
 #endif
       }
       timer_sys_checks = millis();
@@ -3233,6 +3265,13 @@ void loop() {
 #endif
 #ifdef ZsensorGPIOInput
     MeasureGPIOInput();
+#endif
+#ifdef ZgatewayBLETracker
+    loopBLETracker();
+#  ifdef ZmqttDiscovery
+    if (SYSConfig.discovery)
+      launchBTDiscovery(false);
+#  endif
 #endif
 #ifdef ZsensorGPIOKeyCode
     MeasureGPIOKeyCode();
@@ -3400,10 +3439,39 @@ String stateMeasures() {
   freeMem = ESP.getFreeHeap();
 #ifdef ZgatewayRTL_433
   // Some RTL_433 decoders have memory leak, this is a temporary workaround
-  if (freeMem < MinimumMemory) {
-    Log.error(F("Not enough memory %d, restarting" CR), freeMem);
-    gatewayState = GatewayState::ERROR;
-    ESPRestart(8);
+  static uint8_t lowMemoryChecks = 0;
+  static uint32_t lastLowMemoryCheck = 0;
+  const uint32_t lowMemoryNow = millis();
+  const bool lowMemoryCheckDue = !lastLowMemoryCheck ||
+                                 lowMemoryNow - lastLowMemoryCheck >= RTL433_LOW_MEMORY_CHECK_INTERVAL_MS;
+  if (freeMem >= RTL433_LOW_MEMORY_THRESHOLD) {
+    if (lowMemoryChecks) {
+      Log.notice(F("[MEM] heap recovered current=%u threshold=%u previous_checks=%u" CR),
+                 freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks);
+      lowMemoryChecks = 0;
+    }
+  } else if (lowMemoryCheckDue) {
+    // stateMeasures() is also called by the Web UI. Rate-limit the watchdog so
+    // refreshing /in cannot turn several page requests into consecutive
+    // low-memory samples.
+    lastLowMemoryCheck = lowMemoryNow;
+    bool startupGrace = uptime() < RTL433_LOW_MEMORY_GRACE_SECONDS;
+    bool queueBusy = !jsonQueue.empty();
+    if (startupGrace || queueBusy) {
+      lowMemoryChecks = 0;
+      Log.warning(F("[MEM] transient low heap=%u threshold=%u startup_grace=%T queue=%u; restart deferred" CR),
+                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, startupGrace, jsonQueue.size());
+    } else {
+      lowMemoryChecks++;
+      Log.warning(F("[MEM] sustained low heap=%u threshold=%u check=%u/%u interval_ms=%u queue=%u" CR),
+                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks, RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS,
+                  RTL433_LOW_MEMORY_CHECK_INTERVAL_MS, jsonQueue.size());
+      if (lowMemoryChecks >= RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS) {
+        Log.error(F("[MEM] low-memory threshold persisted; restarting heap=%u" CR), freeMem);
+        gatewayState = GatewayState::ERROR;
+        ESPRestart(8);
+      }
+    }
   }
 #endif
   SYSdata["freemem"] = freeMem;
@@ -3471,7 +3539,7 @@ String stateMeasures() {
   SYSdata["modules"] = modules;
 
   SYSdata["origin"] = subjectSYStoMQTT;
-  enqueueJsonObject(SYSdata);
+  if (!stateSnapshotOnly) enqueueJsonObject(SYSdata);
 
   char jsonChar[100];
   serializeJson(modules, jsonChar, 99);
@@ -3487,7 +3555,7 @@ String stateMeasures() {
 
   String output;
   serializeJson(SYSdata, output);
-  Log.notice(F("[DIAG] %s" CR), output.c_str());
+  if (!stateSnapshotOnly) Log.notice(F("[DIAG] %s" CR), output.c_str());
   return output;
 }
 

@@ -199,7 +199,7 @@ String stateRFMeasures() {
   }
 #  endif
   RFdata["origin"] = subjectcommonRFtoMQTT;
-  enqueueJsonObject(RFdata);
+  if (!stateSnapshotOnly) enqueueJsonObject(RFdata);
 
   String output;
   serializeJson(RFdata, output);

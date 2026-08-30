@@ -36,12 +36,13 @@ for an ESP32 Dev Module with a CC1101. It extends the official
 `esp32dev-multi_receiver` environment rather than replacing it. Consequently,
 the original preset and all other OpenMQTTGateway boards remain unchanged.
 
-The example was created for a garage deployment that needed all three of these
+The example was created for a garage deployment that needed all four of these
 capabilities at once:
 
 * RF, RF2 and RTL_433 reception through a CC1101;
 * up to four named contact inputs for a garage door, gate or similar sensors;
-* controlled WOL recovery when the MQTT host is unreachable.
+* controlled WOL recovery when the MQTT host is unreachable;
+* up to four explicitly selected fixed-MAC BLE presence devices.
 
 It is based on OpenMQTTGateway 1.8.1 because that release was stable on the
 target ESP32/CC1101 hardware. The changes remain individually optional and are
@@ -61,12 +62,64 @@ The application image is written to:
 .pio/build/esp32dev-multi_receiver-wol-gpio/firmware.bin
 ```
 
+Two deliberately separate firmware tracks are retained. Version
+`v1.8.1-wol-gpio.8` is the stable no-BLE fallback and includes a complete USB
+recovery bundle in `recovery/v1.8.1-wol-gpio.8`. Version
+`v1.8.1-wol-gpio.32` is the current selected-device BLE edition. Adding BLE to
+the newer image never replaces or deletes the `.8` recovery files.
+
 The inherited CC1101 wiring is CS 5, GDO0 12 and GDO2 27. The first contact
 input defaults to GPIO 4 in driven `INPUT` mode, preserving the original garage
 sensor configuration. Electrical mode, active level, debounce and Home
 Assistant type can be selected independently for every channel. Review the
 [GPIO input configuration](sensors.md#gpio-input) before connecting additional
 sensors.
+
+## Configure selected BLE presence
+
+Open **Device configuration > BLE presence devices**. The page exposes four
+independent slots. For each slot you can:
+
+* choose a recently observed MAC from the suggestions, or enter one manually;
+* assign the friendly name used by Home Assistant;
+* set the away timeout from 5 seconds to 24 hours;
+* reject weak advertisements with a minimum RSSI threshold;
+* enable or disable the Home Assistant entities without rebooting.
+
+An enabled slot publishes a retained presence state and RSSI on
+`home/<gateway>/BTtracker/<slot>`. MQTT discovery creates one presence binary
+sensor and one signal-strength sensor. A detection sets presence immediately;
+if no accepted advertisement arrives before the configured timeout, it changes
+to away. The bounded candidate list, raw-report queue and drop counter prevent a
+busy radio environment from consuming memory without limit.
+
+This is deliberately not the full OpenMQTTGateway BLE decoder. The preset uses
+the ESP32 controller's VHCI interface directly and accepts legacy advertising
+reports only. It never connects to a peripheral and does not compile a BLE host,
+GATT client or sensor decoder. That narrower design leaves enough flash and RAM
+for RTL_433, CC1101 reception, MQTT, the Web UI and dual-slot OTA on the target
+ESP32.
+
+Reliable MAC tracking requires a beacon or tag whose BLE address remains fixed.
+Many phones and privacy-oriented devices rotate random addresses and therefore
+cannot be followed reliably by MAC alone.
+
+The Bluetooth controller is initialized before WiFi and the memory-heavy RF
+decoder tasks. The potentially blocking ESP-IDF initialization call is covered
+by the ESP32 task watchdog and an RTC guard: if it ever fails to complete, the
+next boot disables only the BLE observer and keeps WiFi, MQTT, RF, GPIO and the
+WebUI available. Routine scan/detection diagnostics are verbose-level logs;
+warnings and failures remain visible at the standard log level.
+
+## Install a local firmware image
+
+Open **Firmware Upgrade** and use the local `.bin` upload form. The handler uses
+the same Web UI authentication, rejects non-ESP32 application images, writes the
+image to the inactive OTA slot and restarts only after a complete successful
+upload. BLE processing is stopped first to return controller memory to the OTA
+operation. The online URL-based update path remains available separately; only
+its automatic HTTPS manifest lookup at startup is disabled for this dense
+RF-plus-BLE preset.
 
 ## Configure WOL
 
@@ -129,8 +182,10 @@ configuration access point.
 Runtime losses use the same bounded strategy. Three complete 30-second
 reconnect windows are attempted; if all fail, the firmware shuts the WiFi radio
 down cleanly and performs a software restart into the startup recovery path.
-The OFF-to-STA transition at startup also avoids reusing a half-open driver or
-association state left by a warm reboot. Saved credentials are not erased.
+Non-BLE builds use an OFF-to-STA transition to avoid reusing a half-open driver
+or association state left by a warm reboot. The BLE presence preset instead
+keeps the shared WiFi/Bluetooth controller in its coexistence-safe STA path.
+Saved credentials are not erased.
 
 For post-mortem diagnosis, system state includes `reset_reason`,
 `requested_restart_reason`, `wifi_disconnects` and
@@ -150,8 +205,8 @@ the system-state payload.
 These are preset choices, not global defaults. They can be adapted in a custom
 environment if lower power consumption or watchdog restarts are preferred.
 
-Logs use stable prefixes: `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[QUEUE]`,
-`[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]`. They include reconnect causes,
+Logs use stable prefixes: `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][ADV]`,
+`[MEM]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]`. They include reconnect causes,
 timers, queue pressure and memory information, but never print passwords,
 private keys or certificate contents.
 
@@ -161,11 +216,21 @@ are bounds checked, and the actual MQTT CONNACK result is retained so WOL can
 distinguish transport, broker and authentication failures without opening a
 second probe connection.
 
+The information page is a read-only snapshot. Opening or refreshing it does
+not republish SYS/RF/WebUI state on MQTT or fill the console with duplicate
+diagnostic payloads. If a temporary WebUI allocation leaves too little
+contiguous memory for a queued JSON message, the queue retains that message and
+retries later instead of discarding discovery or state data.
+
 ## Validation status
 
-The example compiles for its dedicated environment and has been smoke-tested
-on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at 433.92 MHz. WiFi,
-authenticated MQTT, RF initialization, retained GPIO state and the WebUI were
-verified. A long-duration RF soak test and a deliberately induced end-to-end
-MQTT outage/WOL cycle are still recommended before relying on it in an
-unattended installation.
+Both `esp32dev-multi_receiver-wol-gpio` and the unchanged upstream
+`esp32dev-multi_receiver` environment compile successfully. The custom image
+was exercised on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at
+433.92 MHz. Tests covered authenticated MQTT, RF initialization, retained GPIO
+state, BLE presence/discovery, local OTA, repeated warm boots, console paging,
+progressive GPIO/BLE pages and sustained mixed WebUI traffic. In the final
+mixed-page run, 75/75 requests completed, MQTT stayed connected, the queue
+returned to zero and no BLE report was dropped. A deliberately induced
+end-to-end broker outage/WOL cycle and a long-duration RF soak are still
+recommended for each deployment.

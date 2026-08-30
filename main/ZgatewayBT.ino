@@ -144,7 +144,7 @@ bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char
   bleTrackerDiscoveryDirty = true;
   if (semaphoreBLETrackers) xSemaphoreGive(semaphoreBLETrackers);
 
-  Log.notice(F("[BLE][TRACKER] configured slot=%u enabled=%T name=%s mac=%s timeout_s=%u min_rssi=%d" CR),
+  Log.verbose(F("[BLE][TRACKER] configured slot=%u enabled=%T name=%s mac=%s timeout_s=%u min_rssi=%d" CR),
              slot + 1, enabled, tracker.name, tracker.mac, tracker.timeoutSeconds, tracker.minRssi);
   return true;
 }
@@ -175,7 +175,7 @@ void saveBLETrackerConfig() {
   preferences.begin(Gateway_Short_Name, false);
   size_t written = preferences.putString("BLETrackers", conf);
   preferences.end();
-  Log.notice(F("[BLE][TRACKER] configuration saved slots=%u bytes=%u result=%u" CR), BLE_TRACKER_MAX, conf.length(), written);
+  Log.verbose(F("[BLE][TRACKER] configuration saved slots=%u bytes=%u result=%u" CR), BLE_TRACKER_MAX, conf.length(), written);
 }
 
 static void loadBLETrackerConfig() {
@@ -183,7 +183,7 @@ static void loadBLETrackerConfig() {
   String conf = preferences.getString("BLETrackers", "");
   preferences.end();
   if (!conf.length()) {
-    Log.notice(F("[BLE][TRACKER] no saved configuration; all slots disabled" CR));
+    Log.verbose(F("[BLE][TRACKER] no saved configuration; all slots disabled" CR));
     return;
   }
   DynamicJsonDocument jsonBuffer(1536);
@@ -200,7 +200,7 @@ static void loadBLETrackerConfig() {
                         item["timeout"] | 120UL, item["minrssi"] | -90);
     slot++;
   }
-  Log.notice(F("[BLE][TRACKER] configuration loaded slots=%u" CR), slot);
+  Log.verbose(F("[BLE][TRACKER] configuration loaded slots=%u" CR), slot);
 }
 
 static void enqueueBLETrackerState(uint8_t slot, const BLETrackerConfig_s& tracker, const char* reason) {
@@ -209,13 +209,17 @@ static void enqueueBLETrackerState(uint8_t slot, const BLETrackerConfig_s& track
   String origin = String("/BTtracker/") + String(slot + 1);
   state["origin"] = origin;
   state["presence"] = tracker.present;
-  state["rssi"] = tracker.lastRssi;
+  if (tracker.present && tracker.lastRssi > -127) {
+    state["rssi"] = tracker.lastRssi;
+  } else {
+    state["rssi"] = nullptr;
+  }
   state["mac"] = tracker.mac;
   state["name"] = tracker.name;
   state["last_seen"] = tracker.lastSeen / 1000UL;
   state["retain"] = true;
   enqueueJsonObject(state, QueueSemaphoreTimeOutTask);
-  Log.notice(F("[BLE][TRACKER] state slot=%u name=%s mac=%s presence=%T rssi=%d reason=%s" CR),
+  Log.verbose(F("[BLE][TRACKER] state slot=%u name=%s mac=%s presence=%T rssi=%d reason=%s" CR),
              slot + 1, tracker.name, tracker.mac, tracker.present, tracker.lastRssi, reason);
 }
 
@@ -326,7 +330,7 @@ static void launchConfiguredBLETrackerDiscovery(bool overrideDiscovery) {
       continue;
     }
     createDiscovery("binary_sensor", stateTopic.c_str(), tracker.name, baseId.c_str(),
-                    will_Topic, "occupancy", "{{ value_json.presence }}", "true", "false", "", 0,
+                    will_Topic, "presence", "{{ 'ON' if value_json.presence else 'OFF' }}", "ON", "OFF", "", 0,
                     "", "", true, "", "", "", "", "", false, stateClassNone);
     String rssiName = String(tracker.name) + " RSSI";
     String rssiId = baseId + "-rssi";
@@ -334,7 +338,7 @@ static void launchConfiguredBLETrackerDiscovery(bool overrideDiscovery) {
                     will_Topic, "signal_strength", "{{ value_json.rssi }}", "", "", "dBm", 0,
                     "", "", true, "", "", "", "", "", false, stateClassMeasurement);
     enqueueBLETrackerState(slot, tracker, overrideDiscovery ? "mqtt-discovery" : "configuration");
-    Log.notice(F("[BLE][TRACKER] Home Assistant discovery slot=%u name=%s mac=%s" CR), slot + 1, tracker.name, tracker.mac);
+    Log.verbose(F("[BLE][TRACKER] Home Assistant discovery slot=%u name=%s mac=%s" CR), slot + 1, tracker.name, tracker.mac);
   }
 }
 #  else
@@ -984,7 +988,7 @@ void BLEscan() {
   int foundCount = foundDevices.getCount();
   if (foundCount)
     scanCount++;
-  Log.notice(F("[BLE][SCAN] found=%d scan=%d queue=%u heap=%u" CR), foundCount, scanCount, uxQueueMessagesWaiting(BLEQueue), ESP.getFreeHeap());
+  Log.verbose(F("[BLE][SCAN] found=%d scan=%d queue=%u heap=%u" CR), foundCount, scanCount, uxQueueMessagesWaiting(BLEQueue), ESP.getFreeHeap());
   // NimBLE retains scan results; release them after callbacks have copied the data.
   pBLEScan->clearResults();
   Log.trace(F("Process BLE stack free: %u" CR), uxTaskGetStackHighWaterMark(xProcBLETaskHandle));
@@ -1174,7 +1178,7 @@ void setupBT() {
   BTConfig.ignoreWBlist = true;
   BTConfig.extDecoderEnable = false;
   BTConfig.enabled = true;
-  Log.notice(F("[BLE][TRACKER] passive profile scan_ms=%u pause_ms=%u interval=%u window=%u slots=%u" CR),
+  Log.verbose(F("[BLE][TRACKER] passive profile scan_ms=%u pause_ms=%u interval=%u window=%u slots=%u" CR),
              BTConfig.scanDuration, BTConfig.BLEinterval, BLEScanInterval, BLEScanWindow, BLE_TRACKER_MAX);
 #  endif
   Log.notice(F("BLE scans interval: %d" CR), BTConfig.BLEinterval);

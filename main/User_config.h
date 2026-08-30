@@ -160,6 +160,9 @@
 #  ifndef CHECK_OTA_UPDATE
 #    define CHECK_OTA_UPDATE true // enable to check for the presence of a new version for your environment on Github
 #  endif
+#  ifndef OTA_STARTUP_UPDATE_CHECK
+#    define OTA_STARTUP_UPDATE_CHECK true // automatically query the release manifest once after startup
+#  endif
 #endif
 
 #ifndef JSON_MSG_BUFFER
@@ -691,6 +694,19 @@ enum PowerMode { DEACTIVATED = -1,
 /*--------------------Minimum freeHeap--------------------*/
 // Below this parameter we trigger a restart, this avoid stuck boards like seen in https://github.com/1technophile/OpenMQTTGateway/issues/1693
 #define MinimumMemory 40000
+
+#ifndef RTL433_LOW_MEMORY_GRACE_SECONDS
+#  define RTL433_LOW_MEMORY_GRACE_SECONDS 60UL
+#endif
+#ifndef RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS
+#  define RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS 3
+#endif
+#ifndef RTL433_LOW_MEMORY_CHECK_INTERVAL_MS
+#  define RTL433_LOW_MEMORY_CHECK_INTERVAL_MS 60000UL
+#endif
+#ifndef RTL433_LOW_MEMORY_THRESHOLD
+#  define RTL433_LOW_MEMORY_THRESHOLD MinimumMemory
+#endif
 
 /*----------------CONFIGURABLE PARAMETERS-----------------*/
 struct SYSConfig_s {
