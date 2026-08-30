@@ -65,7 +65,11 @@ The application image is written to:
 Two deliberately separate firmware variants are retained. Version
 `v1.8.1-wol-gpio.8` is the stable no-BLE edition and includes optional complete
 USB flashing files in `recovery/v1.8.1-wol-gpio.8`. Version
-`v1.8.1-wol-gpio.34` is the current selected-device BLE edition. Adding BLE to
+`v1.8.1-wol-gpio.38` is the current selected-device BLE edition. Its passive
+scan duty cycle balances intermittent-beacon detection with MQTT and WebUI
+responsiveness, and stalled scans are restarted automatically. Local firmware
+uploads yield between flash blocks and restart only after the HTTP response has
+closed, avoiding fast-LAN upload panics and incomplete result pages. Adding BLE to
 the newer image never replaces or deletes the `.8` variant or its flashing files.
 It also clears retained Home Assistant discovery topics for disabled GPIO and
 BLE slots, and removes obsolete discovery switches left by older firmware.

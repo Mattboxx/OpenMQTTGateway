@@ -16,10 +16,10 @@
 #  define BLE_TRACKER_START_DELAY_MS 20000UL
 #endif
 #ifndef BLE_TRACKER_SCAN_INTERVAL_MS
-#  define BLE_TRACKER_SCAN_INTERVAL_MS 400U
+#  define BLE_TRACKER_SCAN_INTERVAL_MS 300U
 #endif
 #ifndef BLE_TRACKER_SCAN_WINDOW_MS
-#  define BLE_TRACKER_SCAN_WINDOW_MS 20U
+#  define BLE_TRACKER_SCAN_WINDOW_MS 30U
 #endif
 #ifndef BLE_TRACKER_MIN_HEAP_TO_START
 #  define BLE_TRACKER_MIN_HEAP_TO_START 50000U
@@ -38,6 +38,9 @@ struct BLETrackerConfig_s {
   uint32_t lastPublish;
   int lastRssi;
   bool present;
+  uint32_t rawMatches;
+  uint32_t rssiRejected;
+  int lastRawRssi;
 };
 
 extern BLETrackerConfig_s BLETrackerConfig[BLE_TRACKER_MAX];

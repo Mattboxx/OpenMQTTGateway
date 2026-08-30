@@ -7,7 +7,7 @@ node_modules
 *.ps1
 !recovery/**/flash-recovery.ps1
 artifacts/*.bin
-!artifacts/OpenMQTTGateway-v1.8.1-wol-gpio.34.bin
+!artifacts/OpenMQTTGateway-v1.8.1-wol-gpio.38.bin
 main/certs/private*
 lib/*
 !lib/esp32-bt-lib

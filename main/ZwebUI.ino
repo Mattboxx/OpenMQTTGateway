@@ -889,12 +889,19 @@ String generateBLETrackerRowHtml(uint8_t slot) {
          HtmlEscape(String(tracker.mac)) + "' placeholder='AA:BB:CC:DD:EE:FF'></p>";
   row += "<p><b>Away timeout</b><small>Time without advertisements before reporting away</small><span class='input-unit'><input name='bt" + suffix +
          "' type='number' min='5' max='86400' value='" + String(tracker.timeoutSeconds) + "'><span>s</span></span></p>";
-  row += "<p><b>Minimum signal</b><small>Ignore detections weaker than this threshold</small><span class='input-unit'><input name='br" + suffix +
+  row += "<p><b>Minimum signal</b><small>Lower values accept weaker signals (for example, -95 reaches farther than -80)</small><span class='input-unit'><input name='br" + suffix +
          "' type='number' min='-100' max='-20' value='" + String(tracker.minRssi) + "'><span>dBm</span></span></p></div>";
   if (tracker.enabled && tracker.present && tracker.lastRssi > -127) {
     row += "<small>Last RSSI: " + String(tracker.lastRssi) + " dBm &middot; last seen at uptime " + String(tracker.lastSeen / 1000UL) + " s</small>";
   } else if (tracker.enabled) {
-    row += "<small>Not currently detected</small>";
+    row += "<small>Not currently detected";
+    if (tracker.rawMatches) {
+      row += " &middot; matching MAC packets: " + String(tracker.rawMatches) +
+             " &middot; last raw RSSI: " + String(tracker.lastRawRssi) + " dBm";
+      if (tracker.rssiRejected)
+        row += " &middot; below threshold: " + String(tracker.rssiRejected);
+    }
+    row += "</small>";
   }
   row += "</section>";
   return row;
@@ -2039,6 +2046,7 @@ bool localFirmwareUploadAuthorized = false;
 bool localFirmwareUploadStarted = false;
 bool localFirmwareUploadSuccess = false;
 bool localFirmwareUploadRequiresRestart = false;
+uint32_t localFirmwareRestartAt = 0;
 size_t localFirmwareUploadBytes = 0;
 size_t localFirmwareNextProgressLog = 0;
 String localFirmwareUploadError;
@@ -2056,6 +2064,7 @@ void handleLocalFirmwareUpload() {
     localFirmwareUploadStarted = false;
     localFirmwareUploadSuccess = false;
     localFirmwareUploadRequiresRestart = false;
+    localFirmwareRestartAt = 0;
     localFirmwareUploadBytes = 0;
     localFirmwareNextProgressLog = 256U * 1024U;
     localFirmwareUploadError = "";
@@ -2114,6 +2123,11 @@ void handleLocalFirmwareUpload() {
       Update.abort();
       return;
     }
+    // A fast LAN client can otherwise feed flash writes continuously enough
+    // to starve the Arduino/WiFi tasks on this memory-constrained build. Yield
+    // briefly for every upload block; normal browser uploads remain quick,
+    // while bursty clients can no longer trigger a watchdog/panic reset.
+    delay(5);
     localFirmwareUploadBytes += written;
     last_ota_activity_millis = millis();
     if (localFirmwareUploadBytes >= localFirmwareNextProgressLog) {
@@ -2171,8 +2185,12 @@ void handleLocalFirmwareUploadFinished() {
              localFirmwareUploadSuccess, localFirmwareUploadBytes,
              localFirmwareUploadSuccess || localFirmwareUploadRequiresRestart);
   if (localFirmwareUploadSuccess || localFirmwareUploadRequiresRestart) {
-    delay(2000);
-    ESPRestart(6);
+    // Do not restart from inside WebServer's upload callback. Let the handler
+    // return so the response can drain, the HTTP client can close and the
+    // BLE/WiFi coexistence guard can release cleanly. WebUILoop performs the
+    // actual restart after this short grace period.
+    localFirmwareRestartAt = millis() + 8000UL;
+    Log.notice(F("[WebUI][OTA] restart scheduled after HTTP response" CR));
   }
 }
 
@@ -2447,6 +2465,15 @@ unsigned long nextWebUIMessage = uptime() + DISPLAY_WEBUI_INTERVAL;
 
 void WebUILoop() {
   server.handleClient();
+
+#  if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
+  if (localFirmwareRestartAt && (int32_t)(millis() - localFirmwareRestartAt) >= 0) {
+    localFirmwareRestartAt = 0;
+    Log.notice(F("[WebUI][OTA] HTTP response released; performing deferred restart" CR));
+    ESPRestart(6);
+    return;
+  }
+#  endif
 
   if (uptime() >= nextWebUIMessage && uxQueueMessagesWaiting(webUIQueue)) {
     webUIQueueMessage* message = nullptr;

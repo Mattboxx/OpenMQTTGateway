@@ -57,6 +57,8 @@ static bool bleTrackerPendingPublish[BLE_TRACKER_MAX];
 static uint8_t bleTrackerPendingReason[BLE_TRACKER_MAX];
 static bool bleTrackerInitialStatePending[BLE_TRACKER_MAX];
 static uint32_t bleTrackerInitialStateSince[BLE_TRACKER_MAX];
+static bool bleTrackerWebPauseRequested;
+static uint32_t bleTrackerLastResumeAttempt;
 
 enum BLETrackerPublishReason : uint8_t {
   BLE_TRACKER_REASON_DETECTED = 1,
@@ -131,6 +133,7 @@ static void initBLETrackerConfig() {
     BLETrackerConfig[slot].timeoutSeconds = 120;
     BLETrackerConfig[slot].minRssi = -90;
     BLETrackerConfig[slot].lastRssi = -127;
+    BLETrackerConfig[slot].lastRawRssi = -127;
   }
 }
 
@@ -163,6 +166,9 @@ bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char
     tracker.lastSeen = 0;
     tracker.lastPublish = 0;
     tracker.lastRssi = -127;
+    tracker.rawMatches = 0;
+    tracker.rssiRejected = 0;
+    tracker.lastRawRssi = -127;
     tracker.present = false;
     bleTrackerPendingPublish[slot] = false;
   }
@@ -286,7 +292,13 @@ static void processBLEAdvertisement(const char* mac, const char* name, int rssi)
   rememberBLETrackerCandidate(mac, name, rssi, now);
   for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
     BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
-    if (!tracker.enabled || strcasecmp(tracker.mac, mac) != 0 || rssi < tracker.minRssi) continue;
+    if (!tracker.enabled || strcasecmp(tracker.mac, mac) != 0) continue;
+    tracker.rawMatches++;
+    tracker.lastRawRssi = rssi;
+    if (rssi < tracker.minRssi) {
+      tracker.rssiRejected++;
+      continue;
+    }
     bool arrived = !tracker.present;
     tracker.present = true;
     tracker.lastSeen = now;
@@ -670,6 +682,7 @@ void stopBLETracker(bool deinitRadio) {
     return;
   }
   bleTrackerScanning = false;
+  bleTrackerWebPauseRequested = false;
   if (deinitRadio && esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
     uint32_t before = ESP.getFreeHeap();
     esp_bt_controller_disable();
@@ -742,11 +755,13 @@ static bool setBLETrackerScanEnabledForWeb(bool enabled) {
 }
 
 bool pauseBLETrackerScanForWeb() {
+  bleTrackerWebPauseRequested = true;
   if (!bleTrackerScanning) return false;
   return setBLETrackerScanEnabledForWeb(false);
 }
 
 void resumeBLETrackerScanAfterWeb() {
+  bleTrackerWebPauseRequested = false;
   if (!bleTrackerScanning && !setBLETrackerScanEnabledForWeb(true)) {
     Log.warning(F("[BLE][ADV] unable to resume scan after WebUI response" CR));
   }
@@ -824,6 +839,12 @@ void loopBLETracker() {
     return;
   }
   driveBLETrackerHCI();
+  if (bleTrackerStarted && bleTrackerHciState == BLE_HCI_READY && !bleTrackerScanning &&
+      !bleTrackerWebPauseRequested && now - bleTrackerLastResumeAttempt >= 5000UL) {
+    bleTrackerLastResumeAttempt = now;
+    if (!setBLETrackerScanEnabledForWeb(true))
+      Log.warning(F("[BLE][ADV] automatic scan resume deferred; retrying in 5 seconds" CR));
+  }
 }
 
 String stateBLETrackerMeasures() {
