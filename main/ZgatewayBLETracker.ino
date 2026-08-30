@@ -55,6 +55,8 @@ static uint32_t bleTrackerMatchedAdvertisements;
 static volatile uint32_t bleTrackerDroppedReports;
 static bool bleTrackerPendingPublish[BLE_TRACKER_MAX];
 static uint8_t bleTrackerPendingReason[BLE_TRACKER_MAX];
+static bool bleTrackerInitialStatePending[BLE_TRACKER_MAX];
+static uint32_t bleTrackerInitialStateSince[BLE_TRACKER_MAX];
 
 enum BLETrackerPublishReason : uint8_t {
   BLE_TRACKER_REASON_DETECTED = 1,
@@ -123,6 +125,8 @@ static void initBLETrackerConfig() {
   memset(bleTrackerCandidates, 0, sizeof(bleTrackerCandidates));
   memset(bleTrackerPendingPublish, 0, sizeof(bleTrackerPendingPublish));
   memset(bleTrackerPendingReason, 0, sizeof(bleTrackerPendingReason));
+  memset(bleTrackerInitialStatePending, 0, sizeof(bleTrackerInitialStatePending));
+  memset(bleTrackerInitialStateSince, 0, sizeof(bleTrackerInitialStateSince));
   for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
     BLETrackerConfig[slot].timeoutSeconds = 120;
     BLETrackerConfig[slot].minRssi = -90;
@@ -142,6 +146,7 @@ bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char
   }
 
   BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
+  bool wasEnabled = tracker.enabled;
   char normalizedMac[18] = {0};
   if (isValidBLETrackerMac(mac)) normalizeBLETrackerMac(mac, normalizedMac);
   bool identityChanged = strcmp(tracker.mac, normalizedMac) != 0;
@@ -160,6 +165,16 @@ bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char
     tracker.lastRssi = -127;
     tracker.present = false;
     bleTrackerPendingPublish[slot] = false;
+  }
+  if (enabled && (identityChanged || !wasEnabled)) {
+    // Keep Home Assistant's retained state during a reboot or a newly armed
+    // slot. The first genuine advertisement wins; otherwise publish away only
+    // after one complete timeout measured from the moment scanning is ready.
+    bleTrackerInitialStatePending[slot] = true;
+    bleTrackerInitialStateSince[slot] = bleTrackerScanning ? millis() : 0;
+  } else if (!enabled) {
+    bleTrackerInitialStatePending[slot] = false;
+    bleTrackerInitialStateSince[slot] = 0;
   }
   bleTrackerDiscoveryDirty = true;
   if (bleTrackerMutex) xSemaphoreGive(bleTrackerMutex);
@@ -276,6 +291,8 @@ static void processBLEAdvertisement(const char* mac, const char* name, int rssi)
     tracker.present = true;
     tracker.lastSeen = now;
     tracker.lastRssi = rssi;
+    bleTrackerInitialStatePending[slot] = false;
+    bleTrackerInitialStateSince[slot] = 0;
     bleTrackerMatchedAdvertisements++;
     if (arrived || now - tracker.lastPublish >= 30000UL) {
       tracker.lastPublish = now;
@@ -408,6 +425,11 @@ static void processBLETrackerHCICompletion() {
   } else if (bleTrackerHciState == BLE_HCI_WAIT_SCAN_ENABLE && opcode == HCI_OPCODE_LE_SET_SCAN_ENABLE) {
     bleTrackerHciState = BLE_HCI_READY;
     bleTrackerScanning = true;
+    const uint32_t scanReadyAt = millis();
+    for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+      if (bleTrackerInitialStatePending[slot] && bleTrackerInitialStateSince[slot] == 0)
+        bleTrackerInitialStateSince[slot] = scanReadyAt;
+    }
     bleTrackerInitGuard = 0;
     Log.verbose(F("[BLE][ADV] passive scan ready heap=%u max_alloc=%u interval_ms=%u window_ms=%u" CR),
                ESP.getFreeHeap(), ESP.getMaxAllocHeap(), BLE_TRACKER_SCAN_INTERVAL_MS, BLE_TRACKER_SCAN_WINDOW_MS);
@@ -498,14 +520,16 @@ void launchBTDiscovery(bool overrideDiscovery) {
       continue;
     }
     createDiscovery("binary_sensor", stateTopic.c_str(), tracker.name, baseId.c_str(),
-                    will_Topic, "presence", "{{ 'ON' if value_json.presence else 'OFF' }}", "ON", "OFF", "", 0,
+                    "", "presence", "{{ 'ON' if value_json.presence else 'OFF' }}", "ON", "OFF", "",
+                    static_cast<int>(tracker.timeoutSeconds),
                     "", "", true, "", "", "", "", "", false, stateClassNone);
     String rssiName = String(tracker.name) + " RSSI";
     String rssiId = baseId + "-rssi";
     createDiscovery("sensor", stateTopic.c_str(), rssiName.c_str(), rssiId.c_str(),
-                    will_Topic, "signal_strength", "{{ value_json.rssi }}", "", "", "dBm", 0,
+                    "", "signal_strength", "{{ value_json.rssi }}", "", "", "dBm", 0,
                     "", "", true, "", "", "", "", "", false, stateClassMeasurement);
-    enqueueBLETrackerState(slot, tracker, overrideDiscovery ? "mqtt-discovery" : "configuration");
+    if (!bleTrackerInitialStatePending[slot])
+      enqueueBLETrackerState(slot, tracker, overrideDiscovery ? "mqtt-discovery" : "configuration");
     Log.verbose(F("[BLE][ADV] Home Assistant discovery slot=%u name=%s mac=%s" CR),
                slot + 1, tracker.name, tracker.mac);
   }
@@ -735,7 +759,17 @@ static void publishBLETrackerChanges() {
     const char* reason = nullptr;
     if (xSemaphoreTake(bleTrackerMutex, pdMS_TO_TICKS(20)) == pdFALSE) return;
     BLETrackerConfig_s& tracker = BLETrackerConfig[slot];
-    if (tracker.enabled && tracker.present && now - tracker.lastSeen >= tracker.timeoutSeconds * 1000UL) {
+    const uint32_t timeoutMs = tracker.timeoutSeconds * 1000UL;
+    if (tracker.enabled && bleTrackerInitialStatePending[slot] && bleTrackerInitialStateSince[slot] != 0 &&
+        now - bleTrackerInitialStateSince[slot] >= timeoutMs) {
+      tracker.present = false;
+      tracker.lastPublish = now;
+      copy = tracker;
+      reason = "initial-timeout";
+      bleTrackerInitialStatePending[slot] = false;
+      bleTrackerInitialStateSince[slot] = 0;
+      bleTrackerPendingPublish[slot] = false;
+    } else if (tracker.enabled && tracker.present && now - tracker.lastSeen >= timeoutMs) {
       tracker.present = false;
       tracker.lastPublish = now;
       copy = tracker;

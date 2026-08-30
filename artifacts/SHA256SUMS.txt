@@ -1,4 +1,5 @@
 762dc3fe73695b1cec9d49f253f01db8d529dca02a0a45262c2d67be831fb503  OpenMQTTGateway-v1.8.1-wol-gpio.32.bin
 e49a87468ba26aa9ebdd48cffd7576e55e1e5cad7b3bbf1a8ea899a55f4f6a19  OpenMQTTGateway-v1.8.1-wol-gpio.33.bin
+4a0d1c5c40f6dbb9383f837081f756618029e5a022474e642f199fd5853995e7  OpenMQTTGateway-v1.8.1-wol-gpio.34.bin
 1e5035e741dc131ff2f00811a029d1719df467e5c103f1daac35e5eea0eff106  OpenMQTTGateway-v1.8.1-wol-gpio.8-recovery.zip
 be57d49ea23ed97067ca3a95722d08161c42ef6c58a694b65b180e9d5d5ffb8e  firmware-v1.8.1-wol-gpio.8.bin

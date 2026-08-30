@@ -65,10 +65,16 @@ The application image is written to:
 Two deliberately separate firmware tracks are retained. Version
 `v1.8.1-wol-gpio.8` is the stable no-BLE fallback and includes a complete USB
 recovery bundle in `recovery/v1.8.1-wol-gpio.8`. Version
-`v1.8.1-wol-gpio.33` is the current selected-device BLE edition. Adding BLE to
+`v1.8.1-wol-gpio.34` is the current selected-device BLE edition. Adding BLE to
 the newer image never replaces or deletes the `.8` recovery files.
 It also clears retained Home Assistant discovery topics for disabled GPIO and
 BLE slots, and removes obsolete discovery switches left by older firmware.
+BLE presence entities intentionally omit MQTT availability so their state is
+always present/away instead of briefly becoming unavailable during a gateway
+restart. The last retained state survives the restart and changes to away only
+after a complete configured timeout with the scanner running and no match.
+Home Assistant receives the same timeout as `off_delay`, so it can still change
+the entity to away if the gateway itself stops publishing entirely.
 
 The inherited CC1101 wiring is CS 5, GDO0 12 and GDO2 27. The first contact
 input defaults to GPIO 4 in driven `INPUT` mode, preserving the original garage
