@@ -56,7 +56,7 @@ Start here:
 
 | Variant | Intended use |
 | --- | --- |
-| `v1.8.1-wol-gpio.8` | Conservatively retained stable fallback with WOL and configurable GPIO inputs, but no BLE observer. Its application image and complete USB recovery bundle remain under `recovery/v1.8.1-wol-gpio.8`. |
+| `v1.8.1-wol-gpio.8` | Stable alternative with WOL and configurable GPIO inputs, but no BLE observer. Its application image is distributed as a normal firmware variant; optional USB flashing files remain under `recovery/v1.8.1-wol-gpio.8`. |
 | `v1.8.1-wol-gpio.34` | Current RF + GPIO + WOL build with selected-device BLE presence, stable retained presence across restarts, local OTA, progressive WebUI pages, queue back-pressure, BLE/WiFi recovery safeguards and automatic cleanup of legacy or disabled HA entities. |
 
 Build the dedicated preset with:

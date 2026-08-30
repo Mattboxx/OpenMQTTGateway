@@ -62,11 +62,11 @@ The application image is written to:
 .pio/build/esp32dev-multi_receiver-wol-gpio/firmware.bin
 ```
 
-Two deliberately separate firmware tracks are retained. Version
-`v1.8.1-wol-gpio.8` is the stable no-BLE fallback and includes a complete USB
-recovery bundle in `recovery/v1.8.1-wol-gpio.8`. Version
+Two deliberately separate firmware variants are retained. Version
+`v1.8.1-wol-gpio.8` is the stable no-BLE edition and includes optional complete
+USB flashing files in `recovery/v1.8.1-wol-gpio.8`. Version
 `v1.8.1-wol-gpio.34` is the current selected-device BLE edition. Adding BLE to
-the newer image never replaces or deletes the `.8` recovery files.
+the newer image never replaces or deletes the `.8` variant or its flashing files.
 It also clears retained Home Assistant discovery topics for disabled GPIO and
 BLE slots, and removes obsolete discovery switches left by older firmware.
 BLE presence entities intentionally omit MQTT availability so their state is
