@@ -470,6 +470,34 @@ void eraseTopic(const char* sensor_type, const char* unique_id) {
   pubMQTT((char*)topic.c_str(), "", true);
 }
 
+void cleanupMqttDiscovery() {
+  // These SYS switches used the longer keys before OpenMQTTGateway 1.4.0.
+  // Clear their retained topics for every build, not only ZgatewayBT builds.
+  eraseTopic("switch", (char*)getUniqueId("discovery", "").c_str());
+  eraseTopic("switch", (char*)getUniqueId("ohdiscovery", "").c_str());
+
+#  ifdef ZsensorGPIOInput
+  // A disabled GPIO must disappear even when global auto-discovery is off.
+  for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
+    if (gpioInputChannels[channel].enabled) continue;
+    String channelId = channel == 0 ? String("GPIOInput") : String("GPIOInput-") + String(channel + 1);
+    eraseTopic("binary_sensor", getUniqueId(channelId.c_str(), "").c_str());
+  }
+#  endif
+
+#  ifdef ZgatewayBLETracker
+  // Each tracker owns a presence entity and an RSSI entity. Clear both when
+  // the slot is disabled, including after an offline configuration/reboot.
+  for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    BLETrackerConfig_s tracker = getBLETrackerConfig(slot);
+    if (tracker.enabled && tracker.mac[0]) continue;
+    String baseId = String(gateway_name) + "-ble-tracker-" + String(slot + 1);
+    eraseTopic("binary_sensor", baseId.c_str());
+    eraseTopic("sensor", (baseId + "-rssi").c_str());
+  }
+#  endif
+}
+
 #  if defined(ZgatewayBT) || defined(SecondaryModule)
 void btPresenceParametersDiscovery() {
   createDiscovery("number", //set Type
@@ -619,6 +647,8 @@ void pubMqttDiscovery() {
                   stateClassNone, //State Class
                   "false", "true" //state_off, state_on
   );
+
+  cleanupMqttDiscovery();
 #  ifdef LED_ADDRESSABLE
   createDiscovery("number", //set Type
                   subjectSYStoMQTT, "SYS: LED Brightness", (char*)getUniqueId("rgbb", "").c_str(), //set state_topic,name,uniqueId
@@ -1340,7 +1370,7 @@ void pubMqttDiscovery() {
                   "false", "true" //state_off, state_on
   );
 
-#      define EntitiesCount 9
+#      define EntitiesCount 7
   const char* obsoleteEntities[EntitiesCount][2] = {
       // Remove previously created entities for version < 1.4.0
       {"switch", "active_scan"}, // Replaced by adaptive scan
@@ -1351,9 +1381,7 @@ void pubMqttDiscovery() {
       {"switch", "erase"}, // Now a button
       {"switch", "force_scan"}, // Now a button
       {"sensor", "interval"}, // Now a number
-      {"sensor", "scanbcnct"}, // Now a number
-      {"switch", "ohdiscovery"}, // Now a new key
-      {"switch", "discovery"}}; // Now a new key
+      {"sensor", "scanbcnct"}}; // Now a number
 
   for (int i = 0; i < EntitiesCount; i++) {
     eraseTopic(obsoleteEntities[i][0], (char*)getUniqueId(obsoleteEntities[i][1], "").c_str());

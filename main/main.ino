@@ -381,6 +381,10 @@ void handle_autodiscovery() {
 #  ifdef ZgatewayRTL_433
     launchRTL_433Discovery(true);
 #  endif
+  } else {
+    // Retained discovery entries for disabled or renamed legacy entities must
+    // be removed even if the user intentionally turned auto-discovery off.
+    cleanupMqttDiscovery();
   }
 
   connectedOnce = true;

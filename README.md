@@ -50,14 +50,14 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
-* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.32)
+* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.33)
 
 ## Firmware variants
 
 | Variant | Intended use |
 | --- | --- |
 | `v1.8.1-wol-gpio.8` | Conservatively retained stable fallback with WOL and configurable GPIO inputs, but no BLE observer. Its application image and complete USB recovery bundle remain under `recovery/v1.8.1-wol-gpio.8`. |
-| `v1.8.1-wol-gpio.32` | Current RF + GPIO + WOL build with selected-device BLE presence, local OTA, progressive WebUI pages, queue back-pressure and BLE/WiFi recovery safeguards. |
+| `v1.8.1-wol-gpio.33` | Current RF + GPIO + WOL build with selected-device BLE presence, local OTA, progressive WebUI pages, queue back-pressure, BLE/WiFi recovery safeguards and automatic cleanup of legacy or disabled HA entities. |
 
 Build the dedicated preset with:
 

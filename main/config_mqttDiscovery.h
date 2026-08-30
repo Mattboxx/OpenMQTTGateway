@@ -29,6 +29,7 @@
 
 extern String getUniqueId(String name, String sufix);
 extern void pubMqttDiscovery();
+extern void cleanupMqttDiscovery();
 
 /**
  * Create a discover messages form a list of attribute
