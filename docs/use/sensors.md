@@ -29,7 +29,8 @@ flash, SPI, the CC1101 and enabled RF modules; duplicate enabled pins are
 rejected. The configuration is persisted and applied after a controlled
 restart.
 
-The supplied `esp32dev-multi_receiver-wol-gpio` preset exposes GPIO 4, 13, 14,
+The supplied `esp32dev-multi_receiver-wol-gpio-ble` and
+`esp32dev-multi_receiver-wol-gpio-no-ble` presets expose GPIO 4, 13, 14,
 16, 17, 21, 22, 25, 26, 32-36 and 39. Its explicit allow-list prevents a saved
 sensor configuration from taking over flash, UART, SPI/CC1101 or ESP32
 boot-strapping pins. Another hardware preset can define its own
@@ -64,7 +65,7 @@ contains an `active` boolean plus the configured electrical `mode`.
 
 ### GPIO Output
 
-The supplied `esp32dev-multi_receiver-wol-gpio` preset adds two output slots.
+Both supplied WOL/GPIO presets add two output slots.
 They are disabled by default and appear as independent Home Assistant switches
 only after being enabled under **Configuration > GPIO inputs & outputs**. Typical
 loads are a relay module's 3.3 V logic input, a low-current LED with its series

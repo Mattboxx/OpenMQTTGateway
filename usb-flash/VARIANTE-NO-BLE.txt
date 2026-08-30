@@ -1,0 +1,1 @@
+WOL + 2 IN + 2 OUT + NO BLE

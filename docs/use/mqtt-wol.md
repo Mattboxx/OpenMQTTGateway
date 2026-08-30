@@ -31,8 +31,9 @@ to one OpenMQTTGateway model and can be added to another ESP32 environment with
 a build flag. When the flag is absent, the WOL UI, state machine and Home
 Assistant entities are not compiled.
 
-The `esp32dev-multi_receiver-wol-gpio` environment is a ready-to-build example
-for an ESP32 Dev Module with a CC1101. It extends the official
+The `esp32dev-multi_receiver-wol-gpio-ble` and
+`esp32dev-multi_receiver-wol-gpio-no-ble` environments are ready-to-build
+examples for an ESP32 Dev Module with a CC1101. They extend the official
 `esp32dev-multi_receiver` environment rather than replacing it. Consequently,
 the original preset and all other OpenMQTTGateway boards remain unchanged.
 
@@ -54,26 +55,32 @@ not assumptions imposed on the other project environments.
 From the repository root:
 
 ```text
-platformio run -e esp32dev-multi_receiver-wol-gpio
+platformio run -e esp32dev-multi_receiver-wol-gpio-ble
+platformio run -e esp32dev-multi_receiver-wol-gpio-no-ble
 ```
 
 The application image is written to:
 
 ```text
-.pio/build/esp32dev-multi_receiver-wol-gpio/firmware.bin
+.pio/build/esp32dev-multi_receiver-wol-gpio-ble/firmware.bin
+.pio/build/esp32dev-multi_receiver-wol-gpio-no-ble/firmware.bin
 ```
 
-Two deliberately separate firmware variants are retained. Version
-`v1.8.1-wol-gpio.8` is the stable no-BLE edition and includes optional complete
-USB flashing files in `recovery/v1.8.1-wol-gpio.8`. Version
-`v1.8.1-wol-gpio.40` is the current selected-device BLE edition. Its passive
+Two deliberately separate, descriptively named firmware variants are retained:
+`WOL + 2 IN + 2 OUT + NO BLE` and `WOL + 2 IN + 2 OUT + BLE`. They use the same
+code, RF/CC1101 modules, WOL policy, two GPIO inputs, two GPIO outputs, Home
+Assistant discovery, WebUI, OTA and recovery safeguards. The only functional
+difference is that the BLE build adds the selected-device observer. Its passive
 scan duty cycle balances intermittent-beacon detection with MQTT and WebUI
-responsiveness, and stalled scans are restarted automatically. Local firmware
-uploads yield between flash blocks and restart only after the HTTP response has
-closed, avoiding fast-LAN upload panics and incomplete result pages. Adding BLE to
-the newer image never replaces or deletes the `.8` variant or its flashing files.
-It also clears retained Home Assistant discovery topics for disabled GPIO and
-BLE slots, and removes obsolete discovery switches left by older firmware.
+responsiveness, and stalled scans are restarted automatically.
+
+Each GitHub release contains both a clearly named application `.bin` for WebUI
+updates and a complete Windows USB ZIP. The ZIP includes standalone esptool,
+bootloader, partitions, OTA data, firmware and an automatic COM-port selection
+script; PlatformIO and Python are not needed. Local uploads yield between flash
+blocks and restart only after the HTTP response has closed, avoiding fast-LAN
+upload panics and incomplete result pages. Disabled GPIO and BLE slots have
+their retained Home Assistant discovery entries removed automatically.
 BLE presence entities intentionally omit MQTT availability so their state is
 always present/away instead of briefly becoming unavailable during a gateway
 restart. The last retained state survives the restart and changes to away only
@@ -251,8 +258,8 @@ retries later instead of discarding discovery or state data.
 
 ## Validation status
 
-Both `esp32dev-multi_receiver-wol-gpio` and the unchanged upstream
-`esp32dev-multi_receiver` environment compile successfully. The custom image
+Both custom environments and the unchanged upstream `esp32dev-multi_receiver`
+environment compile successfully. The BLE image
 was exercised on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at
 433.92 MHz. Tests covered authenticated MQTT, RF initialization, retained GPIO
 input state, BLE presence/discovery, local OTA, repeated warm boots, console

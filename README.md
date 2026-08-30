@@ -7,9 +7,10 @@
 > It does not replace or redefine the many other boards and gateway presets in
 > the upstream project.
 
-The ready-to-build preset is `esp32dev-multi_receiver-wol-gpio`. It keeps the
-official `esp32dev-multi_receiver` preset unchanged and adds features that are
-useful when the gateway is installed away from the MQTT/Home Assistant server.
+The ready-to-build presets are `esp32dev-multi_receiver-wol-gpio-ble` and
+`esp32dev-multi_receiver-wol-gpio-no-ble`. They keep the official
+`esp32dev-multi_receiver` preset unchanged and add features useful when the
+gateway is installed away from the MQTT/Home Assistant server.
 
 ## What this edition adds
 
@@ -51,14 +52,15 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
-* [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.40)
+* [Firmware with BLE](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble)
+* [Firmware without BLE](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble)
 
 ## Firmware variants
 
 | Variant | Intended use |
 | --- | --- |
-| `v1.8.1-wol-gpio.8` | Stable alternative with WOL and configurable GPIO inputs, but no BLE observer. Its application image is distributed as a normal firmware variant; optional USB flashing files remain under `recovery/v1.8.1-wol-gpio.8`. |
-| `v1.8.1-wol-gpio.40` | Current RF + 2-input/2-output + WOL build with selected-device BLE presence, Home Assistant output switches, balanced scanning for intermittent advertisements, automatic BLE and startup recovery, stable retained presence across restarts, paced local OTA with deferred restart, progressive WebUI pages, queue back-pressure and automatic cleanup of legacy or disabled HA entities. |
+| `WOL + 2 IN + 2 OUT + NO BLE` | RF/CC1101, WOL, two configurable inputs and two Home Assistant-controlled outputs. It contains all fixes and features of the BLE edition except the BLE observer, leaving more free memory. |
+| `WOL + 2 IN + 2 OUT + BLE` | The same RF, WOL and GPIO feature set plus selected fixed-MAC BLE presence, balanced scanning, automatic scan recovery and cleanup of disabled BLE entities. |
 
 The two outputs are disabled by default. Their logical command, retained state,
 active-level inversion and restore-after-restart paths were exercised through
@@ -68,8 +70,14 @@ LED or buzzer circuit before enabling it.
 Build the dedicated preset with:
 
 ```text
-platformio run -e esp32dev-multi_receiver-wol-gpio
+platformio run -e esp32dev-multi_receiver-wol-gpio-ble
+platformio run -e esp32dev-multi_receiver-wol-gpio-no-ble
 ```
+
+Every release provides a clearly named WebUI `.bin` and a complete Windows USB
+ZIP containing the portable flashing tool, bootloader, partition table, OTA
+data, application image and a double-click guided script. PlatformIO and Python
+are not required to use those USB packages.
 
 The custom preset is intentionally opt-in. All upstream environments remain
 available, and changes that are not relevant to them stay behind build flags.
