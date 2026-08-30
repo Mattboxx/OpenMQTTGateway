@@ -1900,7 +1900,11 @@ void setup() {
 #endif
 #ifdef ZsensorGPIOInput
   setupGPIOInput();
+  setupGPIOOutput();
   modules.add(ZsensorGPIOInput);
+#  if GPIO_OUTPUT_MAX > 0
+  modules.add("GPIOOutput");
+#  endif
 #endif
 #ifdef ZsensorGPIOKeyCode
   setupGPIOKeyCode();
@@ -2341,6 +2345,9 @@ void saveConfig() {
 #  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
   totalSize += GPIO_INPUT_MAX * (JSON_OBJECT_SIZE(8) + GPIO_INPUT_NAME_SIZE + 32);
 #  endif
+#  if defined(ZsensorGPIOInput) && defined(GPIO_OUTPUT_RUNTIME_CONFIG)
+  totalSize += GPIO_OUTPUT_MAX * (JSON_OBJECT_SIZE(7) + GPIO_OUTPUT_NAME_SIZE + 32);
+#  endif
 #  if !MQTT_BROKER_MODE
   for (int i = 0; i < 3; ++i) { // index 0 contains the default values from the build, these values can't be changed at runtime
     if (cnt_parameters_array[i].validConnection) {
@@ -2444,6 +2451,19 @@ void saveConfig() {
     gpioInput["debounce_ms"] = gpioInputChannels[channel].debounceMs;
     gpioInput["retain_state"] = gpioInputChannels[channel].retainState;
     gpioInput["device_class"] = gpioInputChannels[channel].deviceClass;
+  }
+#  endif
+#  if defined(ZsensorGPIOInput) && defined(GPIO_OUTPUT_RUNTIME_CONFIG)
+  JsonArray gpioOutputs = json.createNestedArray("gpio_outputs");
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    JsonObject gpioOutput = gpioOutputs.createNestedObject();
+    gpioOutput["enabled"] = gpioOutputChannels[channel].enabled;
+    gpioOutput["pin"] = gpioOutputChannels[channel].pin;
+    gpioOutput["name"] = gpioOutputChannels[channel].name;
+    gpioOutput["mode"] = gpioOutputChannels[channel].mode;
+    gpioOutput["active_level"] = gpioOutputChannels[channel].activeLevel;
+    gpioOutput["startup_state"] = gpioOutputChannels[channel].startupState;
+    gpioOutput["retain_state"] = gpioOutputChannels[channel].retainState;
   }
 #  endif
 
@@ -2664,6 +2684,40 @@ bool loadConfigFromFlash() {
                        gpioInputChannels[channel].debounceMs,
                        gpioInputChannels[channel].retainState,
                        gpioInputDeviceClassName(gpioInputChannels[channel].deviceClass));
+            channel++;
+          }
+        }
+#  endif
+#  if defined(ZsensorGPIOInput) && defined(GPIO_OUTPUT_RUNTIME_CONFIG)
+        if (json["gpio_outputs"].is<JsonArray>()) {
+          JsonArray storedGPIOOutputs = json["gpio_outputs"].as<JsonArray>();
+          uint8_t channel = 0;
+          for (JsonObject storedGPIOOutput : storedGPIOOutputs) {
+            if (channel >= GPIO_OUTPUT_MAX) break;
+            gpioOutputChannels[channel].enabled = storedGPIOOutput["enabled"] | false;
+            gpioOutputChannels[channel].pin = storedGPIOOutput["pin"] | 0;
+            const char* storedName = storedGPIOOutput["name"] | "";
+            strncpy(gpioOutputChannels[channel].name, storedName, sizeof(gpioOutputChannels[channel].name) - 1);
+            gpioOutputChannels[channel].name[sizeof(gpioOutputChannels[channel].name) - 1] = '\0';
+            gpioOutputChannels[channel].mode = storedGPIOOutput["mode"] | (uint8_t)GPIO_OUTPUT_MODE_PUSH_PULL;
+            gpioOutputChannels[channel].activeLevel = storedGPIOOutput["active_level"] | (uint8_t)HIGH;
+            gpioOutputChannels[channel].startupState = storedGPIOOutput["startup_state"] | (uint8_t)GPIO_OUTPUT_STARTUP_OFF;
+            gpioOutputChannels[channel].retainState = storedGPIOOutput.containsKey("retain_state")
+                                                           ? storedGPIOOutput["retain_state"].as<bool>()
+                                                           : true;
+            if (gpioOutputChannels[channel].mode >= GPIO_OUTPUT_MODE_COUNT)
+              gpioOutputChannels[channel].mode = GPIO_OUTPUT_MODE_PUSH_PULL;
+            if (gpioOutputChannels[channel].activeLevel != LOW && gpioOutputChannels[channel].activeLevel != HIGH)
+              gpioOutputChannels[channel].activeLevel = HIGH;
+            if (gpioOutputChannels[channel].startupState >= GPIO_OUTPUT_STARTUP_COUNT)
+              gpioOutputChannels[channel].startupState = GPIO_OUTPUT_STARTUP_OFF;
+            Log.notice(F("[GPIO] output configuration loaded channel=%u enabled=%T name=%s pin=%u mode=%s active=%s startup=%s retain=%T" CR),
+                       channel + 1, gpioOutputChannels[channel].enabled,
+                       gpioOutputChannels[channel].name, gpioOutputChannels[channel].pin,
+                       gpioOutputModeName(gpioOutputChannels[channel].mode),
+                       gpioOutputChannels[channel].activeLevel == HIGH ? "HIGH" : "LOW",
+                       gpioOutputStartupName(gpioOutputChannels[channel].startupState),
+                       gpioOutputChannels[channel].retainState);
             channel++;
           }
         }
@@ -3716,6 +3770,9 @@ void receivingDATA(const char* topicOri, const char* datacallback) {
 #  endif
 #  ifdef ZactuatorONOFF
     XtoONOFF(strTopicOri.c_str(), jsondata);
+#  endif
+#  if defined(ZsensorGPIOInput) && GPIO_OUTPUT_MAX > 0
+    XtoGPIOOutput(strTopicOri.c_str(), jsondata);
 #  endif
 #  ifdef ZactuatorSomfy
     XtoSomfy(strTopicOri.c_str(), jsondata);

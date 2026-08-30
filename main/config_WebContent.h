@@ -63,7 +63,7 @@
 #  define configure_6
 #endif
 #if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
-#  define configure_7 "<p><form action='gi' method='get'><button>GPIO input sensors</button></form></p>"
+#  define configure_7 "<p><form action='gi' method='get'><button>GPIO inputs &amp; outputs</button></form></p>"
 #else
 #  define configure_7
 #endif

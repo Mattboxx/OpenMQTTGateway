@@ -27,14 +27,22 @@
 #define config_GPIOInput_h
 
 extern void setupGPIOInput();
+extern void setupGPIOOutput();
 extern void GPIOInputtoX();
 extern void MeasureGPIOInput();
 extern void forcePublishGPIOState();
+extern void XtoGPIOOutput(const char* topicOri, JsonObject& GPIOOutputData);
 #ifndef GPIO_INPUT_MAX
 #  define GPIO_INPUT_MAX 1
 #endif
 #ifndef GPIO_INPUT_NAME_SIZE
 #  define GPIO_INPUT_NAME_SIZE 32
+#endif
+#ifndef GPIO_OUTPUT_MAX
+#  define GPIO_OUTPUT_MAX 0
+#endif
+#ifndef GPIO_OUTPUT_NAME_SIZE
+#  define GPIO_OUTPUT_NAME_SIZE 32
 #endif
 
 enum GPIOInputMode : uint8_t {
@@ -81,14 +89,46 @@ struct GPIOInputChannelConfig_s {
   uint8_t deviceClass;
 };
 
+enum GPIOOutputMode : uint8_t {
+  GPIO_OUTPUT_MODE_PUSH_PULL = 0,
+  GPIO_OUTPUT_MODE_OPEN_DRAIN,
+  GPIO_OUTPUT_MODE_COUNT
+};
+
+enum GPIOOutputStartup : uint8_t {
+  GPIO_OUTPUT_STARTUP_OFF = 0,
+  GPIO_OUTPUT_STARTUP_ON,
+  GPIO_OUTPUT_STARTUP_RESTORE,
+  GPIO_OUTPUT_STARTUP_COUNT
+};
+
+struct GPIOOutputChannelConfig_s {
+  bool enabled;
+  uint8_t pin;
+  char name[GPIO_OUTPUT_NAME_SIZE];
+  uint8_t mode;
+  uint8_t activeLevel;
+  uint8_t startupState;
+  bool retainState;
+};
+
 extern GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX];
 extern const char* gpioInputPinValidationError(int pin, uint8_t mode);
 extern const char* gpioInputModeName(uint8_t mode);
 extern const char* gpioInputDeviceClassName(uint8_t deviceClass);
 extern String gpioInputTopic(uint8_t channel);
+extern GPIOOutputChannelConfig_s gpioOutputChannels[GPIO_OUTPUT_MAX];
+extern const char* gpioOutputPinValidationError(int pin, uint8_t mode);
+extern const char* gpioOutputModeName(uint8_t mode);
+extern const char* gpioOutputStartupName(uint8_t startupState);
+extern String gpioOutputTopic(uint8_t channel);
+extern String gpioOutputCommandTopic(uint8_t channel);
+extern bool gpioOutputIsOn(uint8_t channel);
 /*----------------------------USER PARAMETERS-----------------------------*/
 /*-------------DEFINE YOUR MQTT PARAMETERS BELOW----------------*/
 #define subjectGPIOInputtoMQTT "/GPIOInputtoMQTT"
+#define subjectGPIOOutputtoMQTT "/GPIOOutputtoMQTT"
+#define subjectMQTTtoGPIOOutput "/commands/MQTTtoGPIOOutput"
 #define GPIOInputDebounceDelay 60 //debounce time, increase if there are issues
 
 /*-------------------PIN DEFINITIONS----------------------*/

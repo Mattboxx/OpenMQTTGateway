@@ -13,7 +13,7 @@ home/OpenMQTTGateway/GPIOInputtoMQTT {"gpio":"HIGH","pin":4,"name":"Garage door"
 ```
 
 Builds with `GPIO_INPUT_RUNTIME_CONFIG=true` can expose several independent
-channels. Open **Configuration > GPIO input sensors** in the WebUI to configure:
+channels. Open **Configuration > GPIO inputs & outputs** in the WebUI to configure:
 
 * channel name, GPIO pin and enabled state;
 * electrical mode: driven `INPUT`, internal `PULLUP` or internal `PULLDOWN`;
@@ -37,8 +37,7 @@ boot-strapping pins. Another hardware preset can define its own
 validation.
 
 Channel 1 keeps the original `/GPIOInputtoMQTT` topic for compatibility.
-Additional channels publish to `/GPIOInputtoMQTT/2`,
-`/GPIOInputtoMQTT/3`, and so on. Each enabled channel publishes on startup,
+The second channel publishes to `/GPIOInputtoMQTT/2`. Each enabled channel publishes on startup,
 after a debounced change and after MQTT reconnects, so retained automation state
 does not depend on waiting for the next physical transition.
 
@@ -62,6 +61,47 @@ resistors. ESP32 inputs are not 5 V tolerant.
 
 The MQTT payload retains the `gpio` HIGH/LOW value for compatibility and also
 contains an `active` boolean plus the configured electrical `mode`.
+
+### GPIO Output
+
+The supplied `esp32dev-multi_receiver-wol-gpio` preset adds two output slots.
+They are disabled by default and appear as independent Home Assistant switches
+only after being enabled under **Configuration > GPIO inputs & outputs**. Typical
+loads are a relay module's 3.3 V logic input, a low-current LED with its series
+resistor, or an active buzzer driven through a suitable transistor.
+
+Each output has these independent settings:
+
+* friendly name and output-capable GPIO pin;
+* push-pull mode, which actively drives both HIGH and LOW, or open-drain mode,
+  which can only pull LOW or release the line;
+* active HIGH or active LOW logic, so an inverted relay can still be shown as a
+  normal ON/OFF switch;
+* startup state: always OFF, always ON, or restore the last commanded state
+  from ESP32 non-volatile storage;
+* retained or non-retained MQTT state.
+
+The safe default is push-pull, HIGH means ON and always OFF after boot. The
+firmware writes the inactive level before enabling the output direction to
+avoid a short activation pulse during startup. Home Assistant commands and
+state use separate per-channel topics:
+
+```text
+home/OMG_multi_receiver/commands/MQTTtoGPIOOutput/1 {"state":"ON"}
+home/OMG_multi_receiver/GPIOOutputtoMQTT {"state":"ON","pin":16,"name":"Garage light"}
+```
+
+Output 2 uses the `/2` suffix on both topics. A manual command can also contain
+`OFF`, boolean state, `0`/`1` or `TOGGLE`. The WebUI and boot-time validation
+reject an output pin already assigned to an enabled input, another output,
+flash, SPI, CC1101, RF or the status LED. Disabling an output clears its retained
+state, command and Home Assistant discovery topics.
+
+For this CC1101 preset, output-capable choices are GPIO 4, 13, 14, 16, 17, 21,
+22, 25, 26, 32 and 33. ESP32 GPIO is 3.3 V only and is not 5 V tolerant. Do not
+drive a relay coil, passive buzzer or other substantial load directly from the
+ESP32; use a suitable transistor/MOSFET or a module with a compatible logic
+input. Open-drain requires an external pull-up no higher than 3.3 V.
 
 ### ADC
 The value is between 0 and 1024 and is transmitted via MQTT when it changes.

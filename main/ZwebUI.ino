@@ -704,12 +704,115 @@ void handleGIRow() {
   server.send(200, "text/html", row);
 }
 
+#  if GPIO_OUTPUT_MAX > 0
+String generateGPIOOutputPinData() {
+  String pins = "[";
+  bool first = true;
+#    if defined(ESP32)
+  const int lastPin = 33;
+#    elif defined(ESP8266)
+  const int lastPin = 16;
+#    else
+  const int lastPin = 69;
+#    endif
+  for (int pin = 0; pin <= lastPin; pin++) {
+    uint8_t supportedModes = 0;
+    for (uint8_t mode = 0; mode < GPIO_OUTPUT_MODE_COUNT; mode++) {
+      if (gpioOutputPinValidationError(pin, mode) == nullptr) supportedModes |= (1U << mode);
+    }
+    if (!supportedModes) continue;
+    if (!first) pins += ',';
+    pins += '[' + String(pin) + ',' + String(supportedModes) + ']';
+    first = false;
+  }
+  pins += ']';
+  return pins;
+}
+
+String generateGPIOOutputModeOptions(uint8_t selectedMode) {
+  const char* labels[GPIO_OUTPUT_MODE_COUNT] = {
+      "Push-pull (drives HIGH and LOW)",
+      "Open-drain (LOW or released)"};
+  String options;
+  for (uint8_t mode = 0; mode < GPIO_OUTPUT_MODE_COUNT; mode++) {
+    options += "<option value='" + String(mode) + "'";
+    if (mode == selectedMode) options += " selected";
+    options += ">" + String(labels[mode]) + "</option>";
+  }
+  return options;
+}
+
+String generateGPIOOutputStartupOptions(uint8_t selectedStartup) {
+  const char* labels[GPIO_OUTPUT_STARTUP_COUNT] = {
+      "Always OFF (safest)", "Always ON", "Restore last commanded state"};
+  String options;
+  for (uint8_t startup = 0; startup < GPIO_OUTPUT_STARTUP_COUNT; startup++) {
+    options += "<option value='" + String(startup) + "'";
+    if (startup == selectedStartup) options += " selected";
+    options += ">" + String(labels[startup]) + "</option>";
+  }
+  return options;
+}
+
+String generateGPIOOutputChannelHtml(uint8_t channel) {
+  String suffix = String(channel);
+  const bool isOn = gpioOutputIsOn(channel);
+  String row;
+  row.reserve(2400);
+  row += "<section class='channel-card'><div class='channel-title'><b>Output " + String(channel + 1) +
+         "</b><span class='status-chip " +
+         (gpioOutputChannels[channel].enabled ? (isOn ? "active" : "idle") : "disabled") + "'>" +
+         (gpioOutputChannels[channel].enabled ? (isOn ? "ON" : "OFF") : "disabled") + "</span></div>";
+  row += "<label class='toggle-row'><input type='checkbox' name='oe" + suffix + "'" +
+         (gpioOutputChannels[channel].enabled ? " checked" : "") + "><span>Enable this output and expose it to Home Assistant</span></label>";
+  row += "<div class='form-grid'><p><b>Friendly name</b><small>Switch name in Home Assistant</small><input name='on" + suffix +
+         "' maxlength='" + String(GPIO_OUTPUT_NAME_SIZE - 1) + "' value='" +
+         HtmlEscape(String(gpioOutputChannels[channel].name)) + "'></p>";
+  row += "<p><b>GPIO pin</b><small>Only output-capable pins unused by RF are listed</small><select id='op" + suffix + "' name='op" + suffix +
+         "' data-selected='" + String(gpioOutputChannels[channel].pin) + "'></select></p>";
+  row += "<p><b>Electrical mode</b><small id='oh" + suffix + "' class='field-hint'></small><select id='om" + suffix +
+         "' name='om" + suffix + "' onchange='goh(" + suffix + ")'>" +
+         generateGPIOOutputModeOptions(gpioOutputChannels[channel].mode) + "</select></p>";
+  row += "<p><b>ON level</b><small>Invert this for active-low relays, LEDs or buzzers</small><select name='oa" + suffix + "'><option value='1'" +
+         String(gpioOutputChannels[channel].activeLevel == HIGH ? " selected" : "") + ">HIGH means ON</option><option value='0'" +
+         String(gpioOutputChannels[channel].activeLevel == LOW ? " selected" : "") + ">LOW means ON (inverted)</option></select></p>";
+  row += "<p><b>State after boot</b><small>Applied before Wi-Fi and MQTT connect</small><select name='os" + suffix + "'>" +
+         generateGPIOOutputStartupOptions(gpioOutputChannels[channel].startupState) + "</select></p>";
+  row += "<p><b>MQTT state memory</b><small>Keeps the last reported state in the broker</small><label class='toggle-row'><input type='checkbox' name='or" + suffix + "'" +
+         (gpioOutputChannels[channel].retainState ? " checked" : "") + "><span>Retain output state</span></label></p></div>";
+  row += "<div class='info-box'><b>Electrical safety</b><br>ESP32 GPIOs are 3.3 V only. Open-drain needs an external pull-up and must never be pulled above 3.3 V.</div></section>";
+  return row;
+}
+
+void handleGORow() {
+  WEBUI_SECURE
+  if (!server.hasArg("c")) {
+    server.send(400, "text/plain", "Missing GPIO output channel");
+    return;
+  }
+  String channelText = server.arg("c");
+  char* parseEnd = nullptr;
+  long channel = strtol(channelText.c_str(), &parseEnd, 10);
+  if (!channelText.length() || !parseEnd || *parseEnd != '\0' || channel < 0 || channel >= GPIO_OUTPUT_MAX) {
+    server.send(400, "text/plain", "Invalid GPIO output channel");
+    return;
+  }
+  String row = generateGPIOOutputChannelHtml((uint8_t)channel);
+  Log.notice(F("[WebUI][GPIO] output row channel=%u bytes=%u heap=%u" CR),
+             channel + 1, row.length(), ESP.getFreeHeap());
+  server.send(200, "text/html", row);
+}
+#  endif
+
 void handleGI() {
   WEBUI_TRACE_LOG(F("handleGI: uri: %s, args: %d, method: %d" CR), server.uri(), server.args(), server.method());
   WEBUI_SECURE
 
   if (server.hasArg("save")) {
     GPIOInputChannelConfig_s requested[GPIO_INPUT_MAX];
+#  if GPIO_OUTPUT_MAX > 0
+    GPIOOutputChannelConfig_s requestedOutputs[GPIO_OUTPUT_MAX];
+#  endif
     bool update = false;
     for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
       String suffix = String(channel);
@@ -800,6 +903,88 @@ void handleGI() {
       }
     }
 
+#  if GPIO_OUTPUT_MAX > 0
+    for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+      String suffix = String(channel);
+      requestedOutputs[channel].enabled = server.hasArg("oe" + suffix);
+
+      String modeText = server.arg("om" + suffix);
+      char* modeEnd = nullptr;
+      long mode = strtol(modeText.c_str(), &modeEnd, 10);
+      if (!modeText.length() || !modeEnd || *modeEnd != '\0' || mode < 0 || mode >= GPIO_OUTPUT_MODE_COUNT) {
+        server.send(400, "text/plain", "Invalid electrical mode for output " + String(channel + 1));
+        return;
+      }
+      requestedOutputs[channel].mode = (uint8_t)mode;
+
+      String pinText = server.arg("op" + suffix);
+      char* pinEnd = nullptr;
+      long pin = strtol(pinText.c_str(), &pinEnd, 10);
+      if (!pinText.length() || !pinEnd || *pinEnd != '\0' || pin < 0 || pin > 255) {
+        server.send(400, "text/plain", "Invalid GPIO number for output " + String(channel + 1));
+        return;
+      }
+      const char* pinError = gpioOutputPinValidationError((int)pin, requestedOutputs[channel].mode);
+      if (pinError) {
+        server.send(400, "text/plain", "Invalid GPIO for output " + String(channel + 1) + ": " + pinError);
+        return;
+      }
+      requestedOutputs[channel].pin = (uint8_t)pin;
+
+      String requestedName = server.arg("on" + suffix);
+      requestedName.trim();
+      if (!requestedName.length()) requestedName = "GPIO Output " + String(channel + 1);
+      if (requestedName.length() >= GPIO_OUTPUT_NAME_SIZE) {
+        server.send(400, "text/plain", "Name too long for output " + String(channel + 1));
+        return;
+      }
+      strncpy(requestedOutputs[channel].name, requestedName.c_str(), sizeof(requestedOutputs[channel].name) - 1);
+      requestedOutputs[channel].name[sizeof(requestedOutputs[channel].name) - 1] = '\0';
+
+      String activeText = server.arg("oa" + suffix);
+      if (activeText != "0" && activeText != "1") {
+        server.send(400, "text/plain", "Invalid ON level for output " + String(channel + 1));
+        return;
+      }
+      requestedOutputs[channel].activeLevel = activeText == "1" ? HIGH : LOW;
+
+      String startupText = server.arg("os" + suffix);
+      char* startupEnd = nullptr;
+      long startup = strtol(startupText.c_str(), &startupEnd, 10);
+      if (!startupText.length() || !startupEnd || *startupEnd != '\0' || startup < 0 || startup >= GPIO_OUTPUT_STARTUP_COUNT) {
+        server.send(400, "text/plain", "Invalid startup state for output " + String(channel + 1));
+        return;
+      }
+      requestedOutputs[channel].startupState = (uint8_t)startup;
+      requestedOutputs[channel].retainState = server.hasArg("or" + suffix);
+
+      if (requestedOutputs[channel].enabled) {
+        for (uint8_t input = 0; input < GPIO_INPUT_MAX; input++) {
+          if (requested[input].enabled && requested[input].pin == requestedOutputs[channel].pin) {
+            server.send(400, "text/plain", "GPIO " + String(pin) + " is already used by input " + String(input + 1));
+            return;
+          }
+        }
+        for (uint8_t previous = 0; previous < channel; previous++) {
+          if (requestedOutputs[previous].enabled && requestedOutputs[previous].pin == requestedOutputs[channel].pin) {
+            server.send(400, "text/plain", "GPIO " + String(pin) + " is enabled on more than one output");
+            return;
+          }
+        }
+      }
+
+      if (requestedOutputs[channel].enabled != gpioOutputChannels[channel].enabled ||
+          requestedOutputs[channel].pin != gpioOutputChannels[channel].pin ||
+          strcmp(requestedOutputs[channel].name, gpioOutputChannels[channel].name) != 0 ||
+          requestedOutputs[channel].mode != gpioOutputChannels[channel].mode ||
+          requestedOutputs[channel].activeLevel != gpioOutputChannels[channel].activeLevel ||
+          requestedOutputs[channel].startupState != gpioOutputChannels[channel].startupState ||
+          requestedOutputs[channel].retainState != gpioOutputChannels[channel].retainState) {
+        update = true;
+      }
+    }
+#  endif
+
     if (update) {
       for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
         gpioInputChannels[channel] = requested[channel];
@@ -812,6 +997,18 @@ void handleGI() {
                    gpioInputChannels[channel].retainState,
                    gpioInputDeviceClassName(gpioInputChannels[channel].deviceClass));
       }
+#  if GPIO_OUTPUT_MAX > 0
+      for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+        gpioOutputChannels[channel] = requestedOutputs[channel];
+        Log.notice(F("[WebUI][GPIO] saving output channel=%u enabled=%T name=%s pin=%u mode=%s active=%s startup=%s retain=%T" CR),
+                   channel + 1, gpioOutputChannels[channel].enabled,
+                   gpioOutputChannels[channel].name, gpioOutputChannels[channel].pin,
+                   gpioOutputModeName(gpioOutputChannels[channel].mode),
+                   gpioOutputChannels[channel].activeLevel == HIGH ? "HIGH" : "LOW",
+                   gpioOutputStartupName(gpioOutputChannels[channel].startupState),
+                   gpioOutputChannels[channel].retainState);
+      }
+#  endif
 #  ifndef ESPWifiManualSetup
       saveConfig();
 #  endif
@@ -819,9 +1016,9 @@ void handleGI() {
       char jsonChar[100];
       serializeJson(modules, jsonChar, measureJson(modules) + 1);
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
-      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save GPIO inputs").c_str());
+      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save GPIO").c_str());
       String response = String(buffer) + String(restart_script) + String(script) + String(style);
-      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "GPIO input configuration saved");
+      snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, reset_body, jsonChar, gateway_name, "GPIO input/output configuration saved");
       response += String(buffer);
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
       response += String(buffer);
@@ -836,14 +1033,29 @@ void handleGI() {
   char jsonChar[100];
   serializeJson(modules, jsonChar, measureJson(modules) + 1);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
-  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure GPIO inputs").c_str());
+  snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure GPIO").c_str());
   String pageHeader = String(buffer);
-  String gpioScript = "<script>var gpp=" + generateGPIOInputPinData() + ";function gip(i){var p=document.getElementById('gp'+i),s=Number(p.dataset.selected);for(var e of gpp){var o=document.createElement('option');o.value=e[0];o.dataset.modes=e[1];o.textContent='GPIO '+e[0];if(e[0]===s)o.selected=true;p.appendChild(o);}}function gih(i){var m=document.getElementById('gm'+i).value,h=document.getElementById('gh'+i),p=document.getElementById('gp'+i),moved=false,bit=1<<Number(m);h.textContent=m==='1'?'Connect the contact between GPIO and GND. Open is normally HIGH.':m==='2'?'Connect the contact between GPIO and 3.3 V. Open is normally LOW.':'Use for a driven 0-3.3 V output or an external pull resistor.';for(var o of p.options)o.disabled=!(Number(o.dataset.modes)&bit);if(p.selectedOptions[0]&&p.selectedOptions[0].disabled){for(var o of p.options)if(!o.disabled){o.selected=true;moved=true;break;}}document.getElementById('gpnote'+i).textContent=moved?'Pin changed automatically: the previous GPIO does not support this mode.':'Reserved or incompatible pins are hidden.';}async function gil(){var d=document.getElementById('grows');d.innerHTML='';try{for(var i=0;i<" + String(GPIO_INPUT_MAX) + ";i++){var r=await fetch('gi-row?c='+i,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);d.insertAdjacentHTML('beforeend',await r.text());gip(i);gih(i);}}catch(e){d.innerHTML=\"<div class='info-box'>Unable to load GPIO settings: \"+e.message+\". Reload this page.</div>\";}}window.addEventListener('load',gil);</script>";
+  String gpioScript = "<script>var gpp=" + generateGPIOInputPinData() +
+#  if GPIO_OUTPUT_MAX > 0
+                      ",gop=" + generateGPIOOutputPinData() +
+#  endif
+                      ";function gpfill(id,data,selected){var p=document.getElementById(id);for(var e of data){var o=document.createElement('option');o.value=e[0];o.dataset.modes=e[1];o.textContent='GPIO '+e[0];if(e[0]===selected)o.selected=true;p.appendChild(o);}}function gip(i){gpfill('gp'+i,gpp,Number(document.getElementById('gp'+i).dataset.selected));}function gih(i){var m=document.getElementById('gm'+i).value,h=document.getElementById('gh'+i),p=document.getElementById('gp'+i),moved=false,bit=1<<Number(m);h.textContent=m==='1'?'Connect the contact between GPIO and GND. Open is normally HIGH.':m==='2'?'Connect the contact between GPIO and 3.3 V. Open is normally LOW.':'Use for a driven 0-3.3 V signal or an external resistor.';for(var o of p.options)o.disabled=!(Number(o.dataset.modes)&bit);if(p.selectedOptions[0]&&p.selectedOptions[0].disabled){for(var o of p.options)if(!o.disabled){o.selected=true;moved=true;break;}}document.getElementById('gpnote'+i).textContent=moved?'Pin changed automatically: the previous GPIO does not support this mode.':'Reserved or incompatible pins are hidden.';}"
+#  if GPIO_OUTPUT_MAX > 0
+                      "function gopfill(i){gpfill('op'+i,gop,Number(document.getElementById('op'+i).dataset.selected));}function goh(i){var m=document.getElementById('om'+i).value,h=document.getElementById('oh'+i),p=document.getElementById('op'+i),bit=1<<Number(m);h.textContent=m==='1'?'The pin can pull LOW or release the line; add an external pull-up.':'The pin actively drives both HIGH and LOW.';for(var o of p.options)o.disabled=!(Number(o.dataset.modes)&bit);}"
+#  endif
+                      "async function gil(){var d=document.getElementById('girows');d.innerHTML='';try{for(var i=0;i<" + String(GPIO_INPUT_MAX) + ";i++){var r=await fetch('gi-row?c='+i,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);d.insertAdjacentHTML('beforeend',await r.text());gip(i);gih(i);}}catch(e){d.innerHTML=\"<div class='info-box'>Unable to load input settings: \"+e.message+\". Reload this page.</div>\";}"
+#  if GPIO_OUTPUT_MAX > 0
+                      "var o=document.getElementById('gorows');o.innerHTML='';try{for(var i=0;i<" + String(GPIO_OUTPUT_MAX) + ";i++){var r=await fetch('go-row?c='+i,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);o.insertAdjacentHTML('beforeend',await r.text());gopfill(i);goh(i);}}catch(e){o.innerHTML=\"<div class='info-box'>Unable to load output settings: \"+e.message+\". Reload this page.</div>\";}"
+#  endif
+                      "}window.addEventListener('load',gil);</script>";
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, body_header, jsonChar, gateway_name);
   String bodyHeader = String(buffer);
-  static const char gpioFieldset[] PROGMEM = "<fieldset class='set1'><legend><span><b>GPIO input sensors</b></span></legend>";
-  String intro = "<form method='post' action='gi'><div class='info-box'><b>Independent digital sensors</b><br>Enable up to " + String(GPIO_INPUT_MAX) +
-                 " inputs. The primary input keeps the existing MQTT and Home Assistant identity. For opening, door, garage-door and window types, Active must be the electrical level that means open. Changes are validated and applied after restart.</div><div id='grows'><div class='info-box'>Loading sensor settings...</div></div>";
+  static const char gpioFieldset[] PROGMEM = "<fieldset class='set1'><legend><span><b>GPIO inputs and outputs</b></span></legend>";
+  String intro = "<form method='post' action='gi'><div class='info-box'><b>Two sensors, two controllable outputs</b><br>The first input keeps its existing MQTT and Home Assistant identity. Enabled outputs become independent Home Assistant switches for a relay input, LED, active buzzer or another 3.3 V logic load. Pin conflicts are rejected and changes apply after restart.</div><h3>Digital inputs</h3><div id='girows'><div class='info-box'>Loading input settings...</div></div>"
+#  if GPIO_OUTPUT_MAX > 0
+                 "<h3>Digital outputs</h3><div id='gorows'><div class='info-box'>Loading output settings...</div></div>"
+#  endif
+                 ;
   static const char gpioSaveButton[] PROGMEM = "<br><button name='save' type='submit' class='button bgrn'>Save and restart</button></form></fieldset>";
   static const char gpioFooterMenu[] PROGMEM = body_footer_config_menu;
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
@@ -2426,8 +2638,11 @@ void WebUISetup() {
 #  endif
   server.on("/wu", handleWU); // Configure WebUI
 #  if defined(ZsensorGPIOInput) && defined(GPIO_INPUT_RUNTIME_CONFIG)
-  server.on("/gi", handleGI); // Configure GPIO input sensors
+  server.on("/gi", handleGI); // Configure GPIO inputs and outputs
   server.on("/gi-row", handleGIRow); // Progressive GPIO channel fragment
+#    if GPIO_OUTPUT_MAX > 0
+  server.on("/go-row", handleGORow); // Progressive GPIO output fragment
+#    endif
 #  endif
 #  if defined(ZgatewayBT) || defined(ZgatewayBLETracker)
   server.on("/bt", handleBTTrackers); // Configure selected BLE presence devices

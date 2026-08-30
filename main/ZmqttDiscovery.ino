@@ -483,6 +483,19 @@ void cleanupMqttDiscovery() {
     String channelId = channel == 0 ? String("GPIOInput") : String("GPIOInput-") + String(channel + 1);
     eraseTopic("binary_sensor", getUniqueId(channelId.c_str(), "").c_str());
   }
+  // The previous custom preset exposed four inputs. Remove slots 3 and 4
+  // after migrating to the 2-input/2-output layout.
+  for (uint8_t channel = GPIO_INPUT_MAX; channel < 4; channel++) {
+    String channelId = channel == 0 ? String("GPIOInput") : String("GPIOInput-") + String(channel + 1);
+    eraseTopic("binary_sensor", getUniqueId(channelId.c_str(), "").c_str());
+  }
+#    if GPIO_OUTPUT_MAX > 0
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    if (gpioOutputChannels[channel].enabled) continue;
+    String channelId = channel == 0 ? String("GPIOOutput") : String("GPIOOutput-") + String(channel + 1);
+    eraseTopic("switch", getUniqueId(channelId.c_str(), "").c_str());
+  }
+#    endif
 #  endif
 
 #  ifdef ZgatewayBLETracker
@@ -1059,6 +1072,26 @@ void pubMqttDiscovery() {
                     stateClassNone //State Class
     );
   }
+#    if GPIO_OUTPUT_MAX > 0
+  Log.trace(F("GPIOOutputDiscovery" CR));
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    String channelId = channel == 0 ? String("GPIOOutput") : String("GPIOOutput-") + String(channel + 1);
+    String uniqueId = getUniqueId(channelId.c_str(), "");
+    if (!gpioOutputChannels[channel].enabled) {
+      eraseTopic("switch", uniqueId.c_str());
+      continue;
+    }
+    String stateTopic = gpioOutputTopic(channel);
+    String commandTopic = gpioOutputCommandTopic(channel);
+    createDiscovery("switch",
+                    stateTopic.c_str(), gpioOutputChannels[channel].name, uniqueId.c_str(),
+                    will_Topic, "", "{{ value_json.state }}",
+                    "{\"state\":\"ON\"}", "{\"state\":\"OFF\"}", "",
+                    0, Gateway_AnnouncementMsg, will_Message, true, commandTopic.c_str(),
+                    "", "", "", "", false,
+                    stateClassNone, "OFF", "ON");
+  }
+#    endif
 #  endif
 
 #  ifdef ZsensorINA226

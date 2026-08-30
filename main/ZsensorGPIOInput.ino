@@ -40,10 +40,27 @@ struct GPIOInputChannelState_s {
 
 GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput", GPIO_INPUT_DEFAULT_MODE, GPIO_INPUT_ACTIVE_LEVEL, GPIOInputDebounceDelay, GPIO_INPUT_RETAIN, GPIO_INPUT_CLASS_NONE}};
 GPIOInputChannelState_s gpioInputStates[GPIO_INPUT_MAX];
+GPIOOutputChannelConfig_s gpioOutputChannels[GPIO_OUTPUT_MAX] = {};
+
+struct GPIOOutputChannelState_s {
+  bool initialized;
+  bool logicalOn;
+};
+
+GPIOOutputChannelState_s gpioOutputStates[GPIO_OUTPUT_MAX];
 
 String gpioInputTopic(uint8_t channel) {
   if (channel == 0) return String(subjectGPIOInputtoMQTT);
   return String(subjectGPIOInputtoMQTT) + "/" + String(channel + 1);
+}
+
+String gpioOutputTopic(uint8_t channel) {
+  if (channel == 0) return String(subjectGPIOOutputtoMQTT);
+  return String(subjectGPIOOutputtoMQTT) + "/" + String(channel + 1);
+}
+
+String gpioOutputCommandTopic(uint8_t channel) {
+  return String(subjectMQTTtoGPIOOutput) + "/" + String(channel + 1);
 }
 
 const char* gpioInputModeName(uint8_t mode) {
@@ -63,6 +80,22 @@ const char* gpioInputDeviceClassName(uint8_t deviceClass) {
       "", "opening", "door", "garage_door", "window", "motion",
       "occupancy", "moisture", "smoke", "vibration", "problem"};
   return deviceClass < GPIO_INPUT_CLASS_COUNT ? deviceClasses[deviceClass] : "";
+}
+
+const char* gpioOutputModeName(uint8_t mode) {
+  return mode == GPIO_OUTPUT_MODE_OPEN_DRAIN ? "OPEN_DRAIN" : "PUSH_PULL";
+}
+
+const char* gpioOutputStartupName(uint8_t startupState) {
+  switch (startupState) {
+    case GPIO_OUTPUT_STARTUP_ON:
+      return "ON";
+    case GPIO_OUTPUT_STARTUP_RESTORE:
+      return "RESTORE";
+    case GPIO_OUTPUT_STARTUP_OFF:
+    default:
+      return "OFF";
+  }
 }
 
 static uint8_t gpioInputArduinoMode(uint8_t mode) {
@@ -139,6 +172,83 @@ const char* gpioInputPinValidationError(int pin, uint8_t mode) {
 #  endif
 }
 
+const char* gpioOutputPinValidationError(int pin, uint8_t mode) {
+  if (mode >= GPIO_OUTPUT_MODE_COUNT)
+    return "output mode is not supported";
+#  if defined(GPIO_OUTPUT_ALLOWED_MASK)
+  if (pin < 0 || pin >= 64 || !(GPIO_OUTPUT_ALLOWED_MASK & (1ULL << pin)))
+    return "GPIO is reserved or unsafe for output on this hardware preset";
+#  endif
+#  if defined(ESP32)
+  if (pin < 0 || pin > 33)
+    return "GPIO is not output-capable on a classic ESP32";
+#  elif defined(ESP8266)
+  if (pin < 0 || pin > 16)
+    return "GPIO is not available on ESP8266";
+#  endif
+  // Reuse the board/module reservation checks used by inputs. OUTPUT pins are
+  // a strict subset of the safe INPUT list for this preset.
+  const char* commonError = gpioInputPinValidationError(pin, GPIO_INPUT_MODE_INPUT);
+  if (commonError) return commonError;
+  return nullptr;
+}
+
+static uint8_t gpioOutputArduinoMode(uint8_t mode) {
+#  if defined(OUTPUT_OPEN_DRAIN)
+  if (mode == GPIO_OUTPUT_MODE_OPEN_DRAIN) return OUTPUT_OPEN_DRAIN;
+#  endif
+  return OUTPUT;
+}
+
+bool gpioOutputIsOn(uint8_t channel) {
+  return channel < GPIO_OUTPUT_MAX && gpioOutputStates[channel].initialized && gpioOutputStates[channel].logicalOn;
+}
+
+static void gpioOutputWrite(uint8_t channel, bool logicalOn, bool persist) {
+  GPIOOutputChannelConfig_s& config = gpioOutputChannels[channel];
+  const uint8_t electricalLevel = logicalOn ? config.activeLevel : !config.activeLevel;
+  digitalWrite(config.pin, electricalLevel);
+  gpioOutputStates[channel].logicalOn = logicalOn;
+  gpioOutputStates[channel].initialized = true;
+
+#  if defined(ESP32)
+  if (persist && config.startupState == GPIO_OUTPUT_STARTUP_RESTORE) {
+    char key[12];
+    snprintf(key, sizeof(key), "gpioOut%u", channel + 1);
+    preferences.begin(Gateway_Short_Name, false);
+    const size_t saved = preferences.putBool(key, logicalOn);
+    preferences.end();
+    Log.trace(F("[GPIO] output state persisted channel=%u state=%s result=%u" CR),
+              channel + 1, logicalOn ? "ON" : "OFF", saved);
+  }
+#  else
+  (void)persist;
+#  endif
+}
+
+static bool publishGPIOOutputState(uint8_t channel, const char* reason) {
+  if (channel >= GPIO_OUTPUT_MAX || !gpioOutputChannels[channel].enabled || !gpioOutputStates[channel].initialized)
+    return false;
+  GPIOOutputChannelConfig_s& config = gpioOutputChannels[channel];
+  const bool logicalOn = gpioOutputStates[channel].logicalOn;
+  StaticJsonDocument<JSON_MSG_BUFFER> outputBuffer;
+  JsonObject output = outputBuffer.to<JsonObject>();
+  output["state"] = logicalOn ? "ON" : "OFF";
+  output["active"] = logicalOn;
+  output["gpio"] = digitalRead(config.pin) == HIGH ? "HIGH" : "LOW";
+  output["pin"] = config.pin;
+  output["name"] = config.name;
+  output["mode"] = gpioOutputModeName(config.mode);
+  output["retain"] = config.retainState;
+  output["origin"] = gpioOutputTopic(channel);
+  const bool queued = enqueueJsonObject(output);
+  Log.notice(F("[GPIO] output state channel=%u name=%s pin=%u state=%s electrical=%s reason=%s retain=%T queued=%T mqtt_connected=%T" CR),
+             channel + 1, config.name, config.pin, logicalOn ? "ON" : "OFF",
+             digitalRead(config.pin) == HIGH ? "HIGH" : "LOW", reason,
+             config.retainState, queued, mqtt && mqtt->connected());
+  return queued;
+}
+
 void setupGPIOInput() {
   for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
     GPIOInputChannelConfig_s& config = gpioInputChannels[channel];
@@ -185,6 +295,139 @@ void setupGPIOInput() {
                gpioInputDeviceClassName(config.deviceClass), initialReading == HIGH ? "HIGH" : "LOW",
                gpioInputTopic(channel).c_str());
   }
+}
+
+void setupGPIOOutput() {
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    GPIOOutputChannelConfig_s& config = gpioOutputChannels[channel];
+    gpioOutputStates[channel] = {false, false};
+    const bool neverConfigured = !config.name[0];
+    if (neverConfigured) {
+      snprintf(config.name, sizeof(config.name), "GPIO Output %u", channel + 1);
+      config.mode = GPIO_OUTPUT_MODE_PUSH_PULL;
+      config.activeLevel = HIGH;
+      config.startupState = GPIO_OUTPUT_STARTUP_OFF;
+      config.retainState = true;
+    }
+    if (config.mode >= GPIO_OUTPUT_MODE_COUNT) config.mode = GPIO_OUTPUT_MODE_PUSH_PULL;
+    if (config.activeLevel != LOW && config.activeLevel != HIGH) config.activeLevel = HIGH;
+    if (config.startupState >= GPIO_OUTPUT_STARTUP_COUNT) config.startupState = GPIO_OUTPUT_STARTUP_OFF;
+
+    // Give never-configured disabled slots a useful, safe pin in the WebUI.
+    if (!config.enabled && gpioOutputPinValidationError(config.pin, config.mode)) {
+      const uint8_t defaults[] = {16, 17};
+      if (channel < sizeof(defaults)) config.pin = defaults[channel];
+    }
+    if (!config.enabled) continue;
+
+    const char* validationError = gpioOutputPinValidationError(config.pin, config.mode);
+    if (validationError) {
+      Log.error(F("[GPIO] disabling output channel=%u pin=%u reason=%s" CR), channel + 1, config.pin, validationError);
+      config.enabled = false;
+      continue;
+    }
+    bool conflict = false;
+    for (uint8_t input = 0; input < GPIO_INPUT_MAX; input++) {
+      if (gpioInputChannels[input].enabled && gpioInputChannels[input].pin == config.pin) {
+        Log.error(F("[GPIO] disabling output channel=%u pin=%u conflict=input-%u" CR), channel + 1, config.pin, input + 1);
+        conflict = true;
+        break;
+      }
+    }
+    for (uint8_t previous = 0; !conflict && previous < channel; previous++) {
+      if (gpioOutputChannels[previous].enabled && gpioOutputChannels[previous].pin == config.pin) {
+        Log.error(F("[GPIO] disabling output channel=%u pin=%u conflict=output-%u" CR), channel + 1, config.pin, previous + 1);
+        conflict = true;
+      }
+    }
+    if (conflict) {
+      config.enabled = false;
+      continue;
+    }
+
+    bool initialOn = config.startupState == GPIO_OUTPUT_STARTUP_ON;
+#  if defined(ESP32)
+    if (config.startupState == GPIO_OUTPUT_STARTUP_RESTORE) {
+      char key[12];
+      snprintf(key, sizeof(key), "gpioOut%u", channel + 1);
+      preferences.begin(Gateway_Short_Name, true);
+      initialOn = preferences.getBool(key, false);
+      preferences.end();
+    }
+#  endif
+    // Set the output latch before changing the pin direction to avoid a brief
+    // active pulse during boot or configuration changes.
+    digitalWrite(config.pin, initialOn ? config.activeLevel : !config.activeLevel);
+    pinMode(config.pin, gpioOutputArduinoMode(config.mode));
+    gpioOutputWrite(channel, initialOn, false);
+    Log.notice(F("[GPIO] output initialized channel=%u name=%s pin=%u mode=%s active=%s startup=%s state=%s electrical=%s retain=%T mqtt_state=%s mqtt_command=%s" CR),
+               channel + 1, config.name, config.pin, gpioOutputModeName(config.mode),
+               config.activeLevel == HIGH ? "HIGH" : "LOW", gpioOutputStartupName(config.startupState),
+               initialOn ? "ON" : "OFF", digitalRead(config.pin) == HIGH ? "HIGH" : "LOW",
+               config.retainState, gpioOutputTopic(channel).c_str(), gpioOutputCommandTopic(channel).c_str());
+  }
+}
+
+void XtoGPIOOutput(const char* topicOri, JsonObject& data) {
+  int selectedChannel = -1;
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    String commandSuffix = gpioOutputCommandTopic(channel);
+    String commandFull = String(mqtt_topic) + String(gateway_name) + commandSuffix;
+    if (strcmp(topicOri, commandSuffix.c_str()) == 0 || strcmp(topicOri, commandFull.c_str()) == 0) {
+      selectedChannel = channel;
+      break;
+    }
+  }
+  if (selectedChannel < 0) {
+    String baseFull = String(mqtt_topic) + String(gateway_name) + String(subjectMQTTtoGPIOOutput);
+    if (strcmp(topicOri, subjectMQTTtoGPIOOutput) != 0 && strcmp(topicOri, baseFull.c_str()) != 0) return;
+    const int requestedChannel = data["channel"] | 0;
+    if (requestedChannel < 1 || requestedChannel > GPIO_OUTPUT_MAX) {
+      Log.warning(F("[GPIO] output command rejected reason=invalid-channel channel=%d" CR), requestedChannel);
+      return;
+    }
+    selectedChannel = requestedChannel - 1;
+  }
+
+  GPIOOutputChannelConfig_s& config = gpioOutputChannels[selectedChannel];
+  if (!config.enabled || !gpioOutputStates[selectedChannel].initialized) {
+    Log.warning(F("[GPIO] output command rejected channel=%u reason=disabled" CR), selectedChannel + 1);
+    return;
+  }
+
+  bool requestedOn = false;
+  bool valid = false;
+  if (data["state"].is<bool>()) {
+    requestedOn = data["state"].as<bool>();
+    valid = true;
+  } else if (data["state"].is<const char*>()) {
+    String state = data["state"].as<const char*>();
+    state.toUpperCase();
+    if (state == "ON" || state == "1" || state == "TRUE") {
+      requestedOn = true;
+      valid = true;
+    } else if (state == "OFF" || state == "0" || state == "FALSE") {
+      requestedOn = false;
+      valid = true;
+    } else if (state == "TOGGLE") {
+      requestedOn = !gpioOutputStates[selectedChannel].logicalOn;
+      valid = true;
+    }
+  } else if (data["state"].is<int>()) {
+    requestedOn = data["state"].as<int>() != 0;
+    valid = true;
+  }
+  if (!valid) {
+    Log.warning(F("[GPIO] output command rejected channel=%u reason=invalid-state" CR), selectedChannel + 1);
+    return;
+  }
+
+  const bool previous = gpioOutputStates[selectedChannel].logicalOn;
+  gpioOutputWrite(selectedChannel, requestedOn, previous != requestedOn);
+  Log.notice(F("[GPIO] output command channel=%u name=%s pin=%u previous=%s requested=%s electrical=%s changed=%T" CR),
+             selectedChannel + 1, config.name, config.pin, previous ? "ON" : "OFF", requestedOn ? "ON" : "OFF",
+             digitalRead(config.pin) == HIGH ? "HIGH" : "LOW", previous != requestedOn);
+  publishGPIOOutputState(selectedChannel, "command");
 }
 
 void MeasureGPIOInput() {
@@ -287,6 +530,22 @@ void forcePublishGPIOState() {
                    (gpioInputStates[channel].stableState == HIGH ? "HIGH" : "LOW"),
                gpioInputChannels[channel].retainState);
     gpioInputStates[channel].stableState = 3;
+  }
+  // v1.8.1-wol-gpio.38 exposed four input slots. Clear the two legacy retained
+  // state topics after this preset moves to two inputs.
+  for (uint8_t channel = GPIO_INPUT_MAX; channel < 4; channel++) {
+    String legacyTopic = String(mqtt_topic) + String(gateway_name) + String(subjectGPIOInputtoMQTT) + "/" + String(channel + 1);
+    pubMQTT(legacyTopic.c_str(), "", true);
+  }
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    String fullStateTopic = String(mqtt_topic) + String(gateway_name) + gpioOutputTopic(channel);
+    String fullCommandTopic = String(mqtt_topic) + String(gateway_name) + gpioOutputCommandTopic(channel);
+    if (!gpioOutputChannels[channel].enabled) {
+      pubMQTT(fullStateTopic.c_str(), "", true);
+      pubMQTT(fullCommandTopic.c_str(), "", true);
+      continue;
+    }
+    publishGPIOOutputState(channel, "mqtt-reconnect");
   }
 }
 #endif

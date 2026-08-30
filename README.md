@@ -1,4 +1,4 @@
-# OpenMQTTGateway - MQTT recovery and multi-GPIO edition
+# OpenMQTTGateway - MQTT recovery and configurable GPIO I/O edition
 
 > **This branch is a clearly scoped, optional extension of OpenMQTTGateway
 > 1.8.1.** It was created for an ESP32 garage gateway that receives 433 MHz
@@ -16,8 +16,9 @@ useful when the gateway is installed away from the MQTT/Home Assistant server.
 | Area | Upstream 1.8.1 behaviour | This optional edition |
 | --- | --- | --- |
 | Wake-on-LAN | No MQTT-outage recovery policy | Configurable target MAC, outage delay, failure threshold, repeat interval and error categories; a successful MQTT connection resets every WOL timer |
-| Wired sensors | One build-time GPIO input | Up to four independently enabled and named inputs configured in the Web UI |
+| Wired sensors | One build-time GPIO input | Two independently enabled and named inputs configured in the Web UI |
 | Input electronics | Pin mode fixed at compile time | Per-input `INPUT`, `PULLUP` or `PULLDOWN`, active HIGH/LOW, debounce, retained MQTT state and Home Assistant device class |
+| GPIO outputs | A separate actuator build is needed | Two independently enabled Home Assistant switches for relays, LEDs, active buzzers or 3.3 V logic inputs; each supports push-pull/open-drain, active HIGH/LOW, safe OFF/ON/restore startup and retained state |
 | GPIO safety | Generic board-level validation | The supplied CC1101 preset exposes only pins that do not collide with flash, SPI, CC1101 or ESP32 boot-strapping duties |
 | BLE presence | BLE presets normally publish/ decode the devices they hear | Up to four fixed-MAC BLE devices selected in the Web UI; each gets a retained Home Assistant presence entity plus RSSI, its own away timeout and minimum-signal threshold |
 | MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, predictable DHCP/mDNS hostname, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
@@ -31,9 +32,9 @@ stale state after reconnection. This addresses repeated or apparently random
 WOL packets and timers that did not reset correctly.
 
 Typical uses include a garage, gate, shed or equipment cabinet where one ESP32
-must receive RF devices, expose door/contact and selected BLE presence sensors
-to Home Assistant and wake the machine hosting MQTT when it is genuinely
-unavailable. BLE scanning is passive and duty-limited to reduce contention with
+must receive RF devices, expose door/contact and selected BLE presence sensors,
+and control two small external loads or logic inputs from Home Assistant while
+also waking the machine hosting MQTT when it is genuinely unavailable. BLE scanning is passive and duty-limited to reduce contention with
 the ESP32 WiFi radio. A controller-only VHCI observer avoids the NimBLE/Bluedroid
 host, connections, GATT and decoder tasks. This preset intentionally tracks
 selected devices rather than embedding the full Theengs decoder, because
@@ -49,7 +50,7 @@ BLE address; use a beacon/tag with a fixed MAC when reliable presence is needed.
 Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
-* [GPIO input wiring and electrical modes](docs/use/sensors.md#gpio-input)
+* [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
 * [Downloadable custom firmware](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-wol-multi-gpio.38)
 
 ## Firmware variants
@@ -58,6 +59,11 @@ Start here:
 | --- | --- |
 | `v1.8.1-wol-gpio.8` | Stable alternative with WOL and configurable GPIO inputs, but no BLE observer. Its application image is distributed as a normal firmware variant; optional USB flashing files remain under `recovery/v1.8.1-wol-gpio.8`. |
 | `v1.8.1-wol-gpio.38` | Current RF + GPIO + WOL build with selected-device BLE presence, balanced scanning for intermittent advertisements, automatic scan recovery, stable retained presence across restarts, paced local OTA with deferred restart, progressive WebUI pages, queue back-pressure, BLE/WiFi recovery safeguards and automatic cleanup of legacy or disabled HA entities. |
+
+The next development image, `v1.8.1-wol-gpio.39-test`, replaces the four-input
+layout with two inputs and two configurable outputs. It is intentionally not
+listed as a stable release until the output switches have also been exercised
+with real attached hardware and Home Assistant.
 
 Build the dedicated preset with:
 

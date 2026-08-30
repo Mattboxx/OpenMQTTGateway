@@ -40,7 +40,8 @@ The example was created for a garage deployment that needed all four of these
 capabilities at once:
 
 * RF, RF2 and RTL_433 reception through a CC1101;
-* up to four named contact inputs for a garage door, gate or similar sensors;
+* two named contact inputs for a garage door, gate or similar sensors;
+* two configurable outputs controlled as Home Assistant switches;
 * controlled WOL recovery when the MQTT host is unreachable;
 * up to four explicitly selected fixed-MAC BLE presence devices.
 
@@ -80,12 +81,19 @@ after a complete configured timeout with the scanner running and no match.
 Home Assistant receives the same timeout as `off_delay`, so it can still change
 the entity to away if the gateway itself stops publishing entirely.
 
+Development image `v1.8.1-wol-gpio.39-test` changes the GPIO layout from four
+inputs to two inputs plus two outputs. Outputs default to disabled and OFF, are
+limited to output-capable non-CC1101 pins, and expose independent Home Assistant
+switches when enabled. The `.38` release remains available while this new I/O
+layout is validated on attached output hardware.
+
 The inherited CC1101 wiring is CS 5, GDO0 12 and GDO2 27. The first contact
 input defaults to GPIO 4 in driven `INPUT` mode, preserving the original garage
 sensor configuration. Electrical mode, active level, debounce and Home
-Assistant type can be selected independently for every channel. Review the
-[GPIO input configuration](sensors.md#gpio-input) before connecting additional
-sensors.
+Assistant type can be selected independently for both input channels. Outputs
+default to GPIO 16 and 17 but remain electrically disabled until explicitly
+enabled. Review the [GPIO input and output configuration](sensors.md#gpio-input)
+before connecting sensors or loads.
 
 ## Configure selected BLE presence
 
@@ -240,9 +248,11 @@ Both `esp32dev-multi_receiver-wol-gpio` and the unchanged upstream
 `esp32dev-multi_receiver` environment compile successfully. The custom image
 was exercised on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at
 433.92 MHz. Tests covered authenticated MQTT, RF initialization, retained GPIO
-state, BLE presence/discovery, local OTA, repeated warm boots, console paging,
-progressive GPIO/BLE pages and sustained mixed WebUI traffic. In the final
-mixed-page run, 75/75 requests completed, MQTT stayed connected, the queue
-returned to zero and no BLE report was dropped. A deliberately induced
+input state, BLE presence/discovery, local OTA, repeated warm boots, console
+paging, progressive GPIO/BLE pages and sustained mixed WebUI traffic. The new
+2+2 page loaded all four cards, and a 30-request mixed page run completed
+without an HTTP failure while MQTT stayed connected and the queue returned to
+zero. Physical output switching and restore behaviour still require validation
+with an attached load before `.39-test` is promoted to a stable release. A deliberately induced
 end-to-end broker outage/WOL cycle and a long-duration RF soak are still
 recommended for each deployment.

@@ -48,6 +48,12 @@ entity name. The configured active HIGH/LOW level determines its ON and OFF
 payloads, while the selected device class controls its icon and semantics.
 Disabled channels have their stale discovery topic removed.
 
+The optional 2-input/2-output preset also creates one MQTT switch for each
+enabled output. The switch publishes a JSON ON/OFF command to its own topic and
+reads back the output's reported logical state; active-low electrical inversion
+therefore remains invisible to Home Assistant. Disabling a slot removes its
+retained switch discovery, state and any legacy command payload.
+
 The custom GPIO preset accepts the Home Assistant binary-sensor classes
 `opening`, `door`, `garage_door`, `window`, `motion`, `occupancy`, `moisture`,
 `smoke`, `vibration` and `problem`. Saving a class restarts the gateway and

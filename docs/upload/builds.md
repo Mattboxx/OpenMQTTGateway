@@ -51,7 +51,8 @@ sets the default settings for ESP8266 (NodeMCU v2) devices using the Plight modu
 
 The same inheritance rule is used by optional combined presets. For example,
 `esp32dev-multi_receiver-wol-gpio` extends the unchanged
-`esp32dev-multi_receiver` environment and adds contact inputs plus
+`esp32dev-multi_receiver` environment and adds two contact inputs, two
+Home Assistant-controlled GPIO outputs, selected-device BLE presence plus
 [MQTT outage Wake-on-LAN](../use/mqtt-wol.md). This keeps the standard build
 available for users who only need the original receiver feature set.
 
