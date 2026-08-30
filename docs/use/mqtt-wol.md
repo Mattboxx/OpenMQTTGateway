@@ -74,13 +74,16 @@ difference is that the BLE build adds the selected-device observer. Its passive
 scan duty cycle balances intermittent-beacon detection with MQTT and WebUI
 responsiveness, and stalled scans are restarted automatically.
 
-Each GitHub release contains both a clearly named application `.bin` for WebUI
-updates and a complete Windows USB ZIP. The ZIP includes standalone esptool,
-bootloader, partitions, OTA data, firmware and an automatic COM-port selection
-script; PlatformIO and Python are not needed. Local uploads yield between flash
-blocks and restart only after the HTTP response has closed, avoiding fast-LAN
-upload panics and incomplete result pages. Disabled GPIO and BLE slots have
-their retained Home Assistant discovery entries removed automatically.
+Each GitHub release contains a complete Windows USB ZIP for the first
+installation. The ZIP includes standalone esptool, bootloader, partitions, OTA
+data, firmware and an automatic COM-port selection script; PlatformIO and
+Python are not needed. The separately named application `.bin` is for WebUI
+updates only after one of these custom builds is already installed. The
+original OpenMQTTGateway 1.8.1 WebUI cannot upload a local file. Local uploads
+in this edition yield between flash blocks and restart only after the HTTP
+response has closed, avoiding fast-LAN upload panics and incomplete result
+pages. Disabled GPIO and BLE slots have their retained Home Assistant discovery
+entries removed automatically.
 BLE presence entities intentionally omit MQTT availability so their state is
 always present/away instead of briefly becoming unavailable during a gateway
 restart. The last retained state survives the restart and changes to away only
@@ -147,13 +150,17 @@ warnings and failures remain visible at the standard log level.
 
 ## Install a local firmware image
 
-Open **Firmware Upgrade** and use the local `.bin` upload form. The handler uses
-the same Web UI authentication, rejects non-ESP32 application images, writes the
-image to the inactive OTA slot and restarts only after a complete successful
-upload. BLE processing is stopped first to return controller memory to the OTA
-operation. The online URL-based update path remains available separately; only
-its automatic HTTPS manifest lookup at startup is disabled for this dense
-RF-plus-BLE preset.
+This is an update path, not the initial installation method. First install the
+custom edition with its complete USB ZIP. Once this edition is running, open
+**Firmware Upgrade** and use the local `.bin` upload form for later releases.
+The stock OpenMQTTGateway 1.8.1 firmware does not contain this form.
+
+The handler uses the same Web UI authentication, rejects non-ESP32 application
+images, writes the image to the inactive OTA slot and restarts only after a
+complete successful upload. BLE processing is stopped first to return
+controller memory to the OTA operation. The online URL-based update path
+remains available separately; only its automatic HTTPS manifest lookup at
+startup is disabled for this dense RF-plus-BLE preset.
 
 ## Configure WOL
 

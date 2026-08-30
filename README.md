@@ -24,7 +24,7 @@ gateway is installed away from the MQTT/Home Assistant server.
 | BLE presence | BLE presets normally publish/ decode the devices they hear | Up to four fixed-MAC BLE devices selected in the Web UI; each gets a retained Home Assistant presence entity plus RSSI, its own away timeout and minimum-signal threshold |
 | MQTT resilience | Standard reconnect behaviour | Unique client ID suffix, uninterrupted WiFi association window, protected recovery portal, predictable DHCP/mDNS hostname, bounded MQTT reconnect timing, clean warm-reboot radio shutdown, runtime recovery watchdog, longer keepalive, preserved operation while the broker is offline and safer password updates |
 | Diagnostics | General OpenMQTTGateway logs | Stable `[BOOT]`, `[WIFI]`, `[MQTT]`, `[WOL]`, `[GPIO]`, `[BLE][ADV]`, `[MEM]`, `[QUEUE]`, `[RF][CC1101]`, `[WebUI][OTA]` and `[DIAG]` events with failure causes and memory/queue context; a bounded startup guard automatically recovers from a stalled module initialization |
-| Web interface | Original compact Web UI | Responsive card layout, live GPIO/BLE state, nearby-BLE suggestions, contextual wiring hints and local `.bin` OTA upload for future custom updates |
+| Web interface | Original compact Web UI | Responsive card layout, live GPIO/BLE state, nearby-BLE suggestions, contextual wiring hints and local `.bin` OTA upload after this custom edition has been installed once by USB |
 
 The WOL logic deliberately does not send a magic packet after every ordinary
 disconnect. It distinguishes transport failures, broker refusals and
@@ -74,10 +74,12 @@ platformio run -e esp32dev-multi_receiver-wol-gpio-ble
 platformio run -e esp32dev-multi_receiver-wol-gpio-no-ble
 ```
 
-Every release provides a clearly named WebUI `.bin` and a complete Windows USB
-ZIP containing the portable flashing tool, bootloader, partition table, OTA
-data, application image and a double-click guided script. PlatformIO and Python
-are not required to use those USB packages.
+Every release provides a complete Windows USB ZIP for the **first installation**.
+It contains the portable flashing tool, bootloader, partition table, OTA data,
+application image and a double-click guided script; PlatformIO and Python are
+not required. The separately named WebUI `.bin` is only for later updates from
+a version of this custom edition that already shows **Local firmware file**.
+The original OpenMQTTGateway 1.8.1 WebUI does not provide that local-file form.
 
 The custom preset is intentionally opt-in. All upstream environments remain
 available, and changes that are not relevant to them stay behind build flags.

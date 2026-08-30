@@ -47,6 +47,11 @@ accepts an application `.bin` stored on the computer or phone currently using
 the WebUI. This is useful for custom PlatformIO builds that are not published
 in an online release repository.
 
+This form is part of the custom firmware and is therefore available only after
+the custom edition has been installed once. A device still running the original
+OpenMQTTGateway 1.8.1 firmware must use the complete USB package for its first
+installation; afterwards, later custom releases can be loaded locally here.
+
 The file is streamed directly to the inactive OTA partition. WebUI
 authentication is required when enabled, and the image extension, ESP32 header
 and final flash image are validated before the boot partition changes. A failed

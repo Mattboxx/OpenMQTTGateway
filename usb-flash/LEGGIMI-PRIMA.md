@@ -35,5 +35,8 @@ Tenere premuto **BOOT**, premere e rilasciare **EN/RESET**, quindi rilasciare
 Se non appare alcuna porta COM, provare un altro cavo dati o installare il
 driver del convertitore USB presente sulla scheda (spesso CP2102 o CH340).
 
-Il file `firmware.bin` contenuto nello ZIP puo' essere usato anche dalla pagina
-**Firmware Upgrade -> Local firmware file** del gateway, senza collegamento USB.
+Per la prima installazione dal firmware OpenMQTTGateway originale bisogna usare
+questa procedura USB: la WebUI originale 1.8.1 non permette di scegliere un file
+locale. Dopo aver installato una volta questa edizione personalizzata, il file
+`firmware.bin` puo' essere usato per i successivi aggiornamenti dalla pagina
+**Firmware Upgrade -> Local firmware file**, senza collegamento USB.
