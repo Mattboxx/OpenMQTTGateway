@@ -11,6 +11,7 @@
 
 #  include <Preferences.h>
 #  include <esp_bt.h>
+#  include <esp_coexist.h>
 #  include <esp_err.h>
 #  include <esp_system.h>
 #  include <esp_task_wdt.h>
@@ -58,6 +59,7 @@ static uint8_t bleTrackerPendingReason[BLE_TRACKER_MAX];
 static bool bleTrackerInitialStatePending[BLE_TRACKER_MAX];
 static uint32_t bleTrackerInitialStateSince[BLE_TRACKER_MAX];
 static bool bleTrackerWebPauseRequested;
+static bool bleTrackerWiFiPaused;
 static uint32_t bleTrackerLastResumeAttempt;
 
 enum BLETrackerPublishReason : uint8_t {
@@ -387,6 +389,7 @@ static esp_vhci_host_callback_t bleTrackerVHCICallbacks = {
 };
 
 static bool sendBLETrackerHCICommand(uint16_t opcode, const uint8_t* parameters, uint8_t parameterLength) {
+  if (parameterLength > 12 || (parameterLength && !parameters)) return false;
   if (!esp_vhci_host_check_send_available()) return false;
   uint8_t packet[16] = {HCI_PACKET_COMMAND, static_cast<uint8_t>(opcode & 0xFF),
                         static_cast<uint8_t>(opcode >> 8), parameterLength};
@@ -762,8 +765,27 @@ bool pauseBLETrackerScanForWeb() {
 
 void resumeBLETrackerScanAfterWeb() {
   bleTrackerWebPauseRequested = false;
+  if (bleTrackerWiFiPaused) return;
   if (!bleTrackerScanning && !setBLETrackerScanEnabledForWeb(true)) {
     Log.warning(F("[BLE][ADV] unable to resume scan after WebUI response" CR));
+  }
+}
+
+void setBLETrackerWiFiAvailable(bool available) {
+  if (!available) {
+    if (!bleTrackerWiFiPaused) {
+      bleTrackerWiFiPaused = true;
+      esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+      if (bleTrackerScanning) setBLETrackerScanEnabledForWeb(false);
+    }
+    return;
+  }
+  if (!bleTrackerWiFiPaused) return;
+  bleTrackerWiFiPaused = false;
+  if (!bleTrackerWebPauseRequested) {
+    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+    // Retry asynchronously from loopBLETracker; never reinitialize the radio.
+    bleTrackerLastResumeAttempt = millis() - 5000UL;
   }
 }
 
@@ -808,7 +830,7 @@ void loopBLETracker() {
     processed++;
   }
   publishBLETrackerChanges();
-  if (bleTrackerRuntimeBlocked) return;
+  if (bleTrackerRuntimeBlocked || bleTrackerWiFiPaused) return;
 
   uint32_t now = millis();
   if (!bleTrackerStarted) {
@@ -854,6 +876,8 @@ String stateBLETrackerMeasures() {
   state["starting"] = bleTrackerStarting;
   state["blocked"] = bleTrackerRuntimeBlocked;
   state["scanning"] = bleTrackerScanning;
+  state["paused_web"] = bleTrackerWebPauseRequested;
+  state["paused_wifi"] = bleTrackerWiFiPaused;
   state["advertisements"] = bleTrackerAdvertisements;
   state["matched"] = bleTrackerMatchedAdvertisements;
   state["dropped"] = bleTrackerDroppedReports;

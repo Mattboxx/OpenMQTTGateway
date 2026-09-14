@@ -26,6 +26,8 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "User_config.h"
+#include "RuntimeDiagnostics.h"
+#include "CheckedMessageQueue.h"
 
 enum GatewayState {
   WAITING_ONBOARDING,
@@ -105,7 +107,7 @@ struct JsonBundle {
   StaticJsonDocument<JSON_MSG_BUFFER> doc;
 };
 
-std::queue<std::string> jsonQueue;
+CheckedMessageQueue<QueueSize> jsonQueue;
 
 #ifdef ESP32
 #  include <driver/adc.h>
@@ -299,6 +301,7 @@ static int cnt_index = CNT_DEFAULT_INDEX;
 #  include <FS.h>
 #  include <SPIFFS.h>
 #  include <esp_system.h>
+#  include <esp_timer.h>
 #  include <esp_task_wdt.h>
 #  include <nvs.h>
 #  include <nvs_flash.h>
@@ -597,18 +600,8 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
     gatewayState = GatewayState::ERROR;
     return true;
   }
-  if (queueLength >= QueueSize) {
-    const char* origin = jsonDoc["origin"];
-    if (!origin) origin = jsonDoc["topic"];
-    if (!origin) origin = "unknown";
-    Log.warning(F("[QUEUE] full current=%d capacity=%d blocked_total=%l received_total=%l origin=%s heap=%u" CR),
-                queueLength, QueueSize, blockedMessages + 1, receivedMessages, origin, ESP.getFreeHeap());
-    blockedMessages++;
-    return false;
-  }
   Log.trace(F("Enqueue JSON" CR));
-  std::string jsonString;
-  serializeJson(jsonDoc, jsonString);
+  const size_t payloadBytes = measureJson(jsonDoc);
 #ifdef ESP32
   // Semaphore check before enqueueing a document
   if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(timeout)) == pdFALSE) {
@@ -619,12 +612,24 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
     return false;
   }
 #endif
-  jsonQueue.push(jsonString);
+  // Preserve working memory for MQTT, WebUI and the recovery path. All queue
+  // admission and serialization happen under the same lock, with one checked
+  // allocation instead of repeated, throwing std::string growth and copies.
+  const bool headroom = ESP.getFreeHeap() >= payloadBytes + 8192U;
+  const bool accepted = headroom && payloadBytes <= JSON_MSG_BUFFER_MAX &&
+                        jsonQueue.tryPush(payloadBytes, [&](char* data, size_t capacity) {
+                          return serializeJson(jsonDoc, data, capacity) == payloadBytes;
+                        });
+  const unsigned long dropped = accepted ? blockedMessages : ++blockedMessages;
+  const size_t sizeAfterPush = jsonQueue.size();
 #ifdef ESP32
   xSemaphoreGive(xQueueMutex);
 #endif
-  Log.trace(F("Queue length: %d" CR), jsonQueue.size());
-  return true;
+  if (!accepted && (dropped == 1 || dropped % 64 == 0))
+    Log.warning(F("[QUEUE] rejected bytes=%u current=%u blocked_total=%l heap=%u; allocation or capacity unavailable" CR),
+                (unsigned int)payloadBytes, (unsigned int)sizeAfterPush, dropped, ESP.getFreeHeap());
+  Log.trace(F("Queue length: %u" CR), (unsigned int)sizeAfterPush);
+  return accepted;
 }
 
 // Semaphore check before enqueueing a document with default timeout QueueSemaphoreTimeOutLoop
@@ -694,7 +699,13 @@ void buildTopicFromId(JsonObject& Jsondata, const char* origin) {
 
 // Empty the documents queue
 void emptyQueue() {
+#ifdef ESP32
+  if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(QueueSemaphoreTimeOutLoop)) == pdFALSE) return;
+#endif
   queueLength = jsonQueue.size();
+#ifdef ESP32
+  xSemaphoreGive(xQueueMutex);
+#endif
   if (queueLength > maxQueueLength) {
     maxQueueLength = queueLength;
     if (maxQueueLength >= (QueueSize * 3) / 4) {
@@ -729,7 +740,13 @@ void emptyQueue() {
     return;
   }
 #endif
-  queuedPayloadBytes = jsonQueue.front().size();
+  if (jsonQueue.empty()) {
+#ifdef ESP32
+    xSemaphoreGive(xQueueMutex);
+#endif
+    return;
+  }
+  queuedPayloadBytes = jsonQueue.frontSize();
   auto error = deserializeJson(jsonBuffer, jsonQueue.front());
   jsonQueue.pop();
 #ifdef ESP32
@@ -2019,10 +2036,15 @@ void setup() {
              millis() - setupStartedMs, ESP.getFreeHeap(), ESP.getMinFreeHeap());
 #endif
   Log.notice(F("************** Setup OpenMQTTGateway end **************" CR));
+  runtimeDiagnosticsBegin();
 }
 
 // Bypass for ESP not reconnecting automaticaly the second time https://github.com/espressif/arduino-esp32/issues/2501
 bool wifi_reconnect_bypass() {
+  runtimePhase(RuntimePhase::WiFi);
+#ifdef ZgatewayBLETracker
+  setBLETrackerWiFiAvailable(false);
+#endif
 #if defined(ESP32) && defined(USE_BLUFI)
   extern bool omg_blufi_ble_connected;
   if (omg_blufi_ble_connected) {
@@ -2061,6 +2083,9 @@ bool wifi_reconnect_bypass() {
                millis() - reconnectStarted, WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(),
                WiFi.channel(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
                WiFi.dnsIP().toString().c_str());
+#ifdef ZgatewayBLETracker
+    setBLETrackerWiFiAvailable(true);
+#endif
     return true;
   } else {
     Log.error(F("[WIFI] reconnect timeout elapsed_ms=%l final_status=%d ssid=%s disconnects=%u last_disconnect=%u:%s heap=%u recovery_portal=%T" CR),
@@ -2105,7 +2130,8 @@ void setOTA() {
     ESPRestart(6);
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Log.trace(F("Progress: %u%%\r" CR), (progress / (total / 100)));
+    runtimeProgress(RuntimePhase::OTA);
+    Log.trace(F("Progress: %u%%\r" CR), total ? (unsigned int)((uint64_t)progress * 100 / total) : 0U);
     gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
     last_ota_activity_millis = millis();
   });
@@ -2213,6 +2239,7 @@ void setupTLS(int index) {
   10 - Startup/module initialization watchdog
 */
 void ESPRestart(byte reason) {
+  runtimePhase(RuntimePhase::Restart);
 #ifdef SecondaryModule
   // Erase the secondary module config
   String restartCmdStr = "{\"cmd\":\"" + String(restartCmd) + "\"}";
@@ -2227,10 +2254,8 @@ void ESPRestart(byte reason) {
   jsondata["uptime"] = uptime();
   jsondata["origin"] = subjectLOGtoMQTT;
   pub(jsondata); // We go to MQTT bypassing the queue to ensure the message is sent
-  // Clean queue
-  while (!jsonQueue.empty()) {
-    jsonQueue.pop();
-  }
+  // Do not mutate the shared queue here: producers on other tasks may still
+  // enqueue. The reset releases RAM without racing their container operations.
   Log.warning(F("Rebooting for reason code %d" CR), reason);
 #if defined(ESP32)
   omgRequestedRestartReasonRtc = reason;
@@ -3029,6 +3054,7 @@ void WiFiDiagnosticEvent(arduino_event_id_t event, arduino_event_info_t info) {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
     lastWiFiDisconnectReason = info.wifi_sta_disconnected.reason;
     wifiDisconnectCount++;
+    runtimeWiFiEvent(info.wifi_sta_disconnected.reason);
   }
 }
 
@@ -3195,6 +3221,7 @@ void sleep() {}
 #endif
 
 void loop() {
+  runtimeProgress(RuntimePhase::Loop);
 #ifndef ESPWifiManualSetup
   checkButton(); // check if a reset of wifi/mqtt settings is asked
 #endif
@@ -3251,12 +3278,15 @@ void loop() {
 #endif
 
   if (ethConnected || WiFi.status() == WL_CONNECTED) {
+#ifdef ZgatewayBLETracker
+    setBLETrackerWiFiAvailable(true);
+#endif
     if (ethConnected && WiFi.status() == WL_CONNECTED) {
       WiFi.disconnect(); // we disconnect the wifi as we are connected to ethernet
     }
     ArduinoOTA.handle();
     failure_number_ntwk = 0;
-    if (now > (timer_sys_checks + (TimeBetweenCheckingSYS * 1000)) || !timer_sys_checks) {
+    if (now - timer_sys_checks >= (TimeBetweenCheckingSYS * 1000UL) || !timer_sys_checks) {
 #if message_UTCtimestamp || message_unixtimestamp
       TheengsUtils::syncNTP();
 #endif
@@ -3270,16 +3300,19 @@ void loop() {
       timer_sys_checks = millis();
     }
 #if defined(ZwebUI) && defined(ESP32)
+    runtimePhase(RuntimePhase::Web);
     WebUILoop();
 #endif
+    runtimePhase(RuntimePhase::MQTT);
     mqtt->loop();
+    now = millis(); // A discovery callback may just have updated lastDiscovery.
     if (mqtt->connected()) { // MQTT client is still connected
       failure_number_ntwk = 0;
 
 #ifdef ZmqttDiscovery
       // Deactivate autodiscovery after DiscoveryAutoOffTimer.
       // Exception: when discovery_republish_on_reconnect is enabled, we never never automatically disable discovery
-      if (!discovery_republish_on_reconnect && SYSConfig.discovery && (now > lastDiscovery + DiscoveryAutoOffTimer))
+      if (!discovery_republish_on_reconnect && SYSConfig.discovery && (now - lastDiscovery >= DiscoveryAutoOffTimer))
         SYSConfig.discovery = false;
 #endif
     }
@@ -3291,6 +3324,7 @@ void loop() {
     gatewayState = GatewayState::NTWK_DISCONNECTED;
     if (!wifi_reconnect_bypass()) {
       failure_number_ntwk++;
+      if (failure_number_ntwk == 1) runtimeRememberWiFiFailure();
       Log.error(F("[WIFI] runtime reconnect window failed cycle=%d restart_after=%d" CR),
                 failure_number_ntwk, WIFI_RUNTIME_RESTART_AFTER_FAILURES);
       if (failure_number_ntwk >= WIFI_RUNTIME_RESTART_AFTER_FAILURES) {
@@ -3304,7 +3338,9 @@ void loop() {
     }
   }
   if (!ProcessLock) {
-    if (now > (timer_sys_measures + (TimeBetweenReadingSYS * 1000)) || !timer_sys_measures) {
+    runtimePhase(RuntimePhase::Sensors);
+    now = millis(); // Network/OTA handlers may have occupied the loop meanwhile.
+    if (now - timer_sys_measures >= (TimeBetweenReadingSYS * 1000UL) || !timer_sys_measures) {
       timer_sys_measures = millis();
       stateMeasures();
 #ifdef ZgatewayBT
@@ -3454,6 +3490,7 @@ void loop() {
 #endif
   }
   // Empty the queue
+  runtimePhase(RuntimePhase::Queue);
   emptyQueue();
   // Sleep if ready
   if (ready_to_sleep) {
@@ -3465,6 +3502,12 @@ void loop() {
  * Calculate uptime and take into account the millis() rollover
  */
 unsigned long uptime() {
+#ifdef ESP32
+  // Monotonic 64-bit clock, safe when several tasks request uptime together.
+  // No shared rollover accumulator that can mistake an interleaved call for
+  // another wrap of millis(). The published value remains seconds.
+  return static_cast<unsigned long>(esp_timer_get_time() / 1000000ULL);
+#else
   static unsigned long lastUptime = 0;
   static unsigned long uptimeAdd = 0;
   unsigned long uptime = millis() / 1000 + uptimeAdd;
@@ -3474,6 +3517,7 @@ unsigned long uptime() {
   }
   lastUptime = uptime;
   return uptime;
+#endif
 }
 
 /**
@@ -3520,6 +3564,15 @@ void eraseConfig() {
 
 String stateMeasures() {
   StaticJsonDocument<JSON_MSG_BUFFER> SYSdata;
+  size_t queuedMessages = queueLength > 0 ? queueLength : 0;
+#ifdef ESP32
+  if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(QueueSemaphoreTimeOutLoop)) == pdTRUE) {
+    queuedMessages = jsonQueue.size();
+    xSemaphoreGive(xQueueMutex);
+  }
+#else
+  queuedMessages = jsonQueue.size();
+#endif
 
   SYSdata["uptime"] = uptime();
 
@@ -3559,28 +3612,28 @@ String stateMeasures() {
   const uint32_t lowMemoryNow = millis();
   const bool lowMemoryCheckDue = !lastLowMemoryCheck ||
                                  lowMemoryNow - lastLowMemoryCheck >= RTL433_LOW_MEMORY_CHECK_INTERVAL_MS;
-  if (freeMem >= RTL433_LOW_MEMORY_THRESHOLD) {
+  if (!stateSnapshotOnly && freeMem >= RTL433_LOW_MEMORY_THRESHOLD) {
     if (lowMemoryChecks) {
       Log.notice(F("[MEM] heap recovered current=%u threshold=%u previous_checks=%u" CR),
                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks);
       lowMemoryChecks = 0;
     }
-  } else if (lowMemoryCheckDue) {
+  } else if (!stateSnapshotOnly && lowMemoryCheckDue) {
     // stateMeasures() is also called by the Web UI. Rate-limit the watchdog so
     // refreshing /in cannot turn several page requests into consecutive
     // low-memory samples.
     lastLowMemoryCheck = lowMemoryNow;
     bool startupGrace = uptime() < RTL433_LOW_MEMORY_GRACE_SECONDS;
-    bool queueBusy = !jsonQueue.empty();
+    bool queueBusy = queuedMessages != 0;
     if (startupGrace || queueBusy) {
       lowMemoryChecks = 0;
       Log.warning(F("[MEM] transient low heap=%u threshold=%u startup_grace=%T queue=%u; restart deferred" CR),
-                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, startupGrace, jsonQueue.size());
+                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, startupGrace, queuedMessages);
     } else {
       lowMemoryChecks++;
       Log.warning(F("[MEM] sustained low heap=%u threshold=%u check=%u/%u interval_ms=%u queue=%u" CR),
                   freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks, RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS,
-                  RTL433_LOW_MEMORY_CHECK_INTERVAL_MS, jsonQueue.size());
+                  RTL433_LOW_MEMORY_CHECK_INTERVAL_MS, queuedMessages);
       if (lowMemoryChecks >= RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS) {
         Log.error(F("[MEM] low-memory threshold persisted; restarting heap=%u" CR), freeMem);
         gatewayState = GatewayState::ERROR;
@@ -3599,7 +3652,7 @@ String stateMeasures() {
   SYSdata["msgblck"] = blockedMessages;
   SYSdata["msgrcv"] = receivedMessages;
   SYSdata["maxq"] = maxQueueLength;
-  SYSdata["qsize"] = jsonQueue.size();
+  SYSdata["qsize"] = queuedMessages;
   SYSdata["mqttc"] = mqtt && mqtt->connected();
   SYSdata["mqttfail"] = failure_number_mqtt;
   SYSdata["ntwkfail"] = failure_number_ntwk;

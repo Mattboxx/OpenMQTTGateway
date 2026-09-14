@@ -265,6 +265,84 @@ retries later instead of discarding discovery or state data.
 
 ## Validation status
 
+### Reliability revision 5 (September 2026)
+
+**Validation in progress — not a stable release.** All three target builds and
+five native test programs pass. On intermediate revision 4, 51 mixed read-only HTTP requests
+completed successfully, but a subsequent repeated-GPIO-page test was interrupted
+when the BLE device stopped answering HTTP and ICMP. The router and repeater
+remained reachable; automatic recovery had not been observed at the last check.
+After power cycling, the saved crash matched the old dump byte for byte and no
+new persistent incident was available. Revision 5 removes two dependencies from
+the emergency guard: heap-lock acquisition and normal radio shutdown callbacks.
+It uses cached memory samples and the pinned IDF's low-level emergency restart
+when preserving an existing dump. This hardens recovery but does not establish
+the cause of the offline event or prove recovery from every failure.
+The new offline event has not yet been diagnosed. Do not interpret the fixes
+below as proof of multi-day stability or publish this candidate as final.
+
+Revision 5 was installed by local OTA and checked with light HTTP requests:
+MQTT connected, BLE advertisements and matches advancing, GPIO page and BLE
+configuration fragment complete. The emergency reset itself was not deliberately
+triggered on the deployed device. The NO-BLE image was compiled but not installed
+in this validation session. Revision 5 is published as two separate pre-releases;
+the preceding public releases have not been replaced.
+
+A saved crash decoded against its exact original ELF confirmed an uncaught
+`std::bad_alloc` while `stateMeasures()` serialized a system MQTT message into
+the outgoing queue. The queue now uses fixed slots and one checked payload
+allocation: exhaustion, a full queue or failed serialization reject the message
+and increment `msgblck` instead of throwing. Admission preserves 8 KiB of heap
+headroom; this is a precaution, not a guarantee that other allocations succeed.
+The cause of the preceding memory pressure has not yet been established.
+The saved panic occurred after the initial outage and does not prove that the
+initial outage had the same cause.
+
+Both custom variants include a runtime progress guard. If the main loop or an
+OTA write stops making progress for 120 seconds, an independent task records
+the stalled phase and requests recovery without waiting for MQTT or the log
+subsystem. Active OTA writes refresh progress. The runtime guard complements
+the existing startup guard; it is not a guarantee against every hardware or
+radio failure.
+
+On the next warm boot, a stalled-loop incident is copied from RTC memory to NVS.
+The first failed Wi-Fi recovery window in an outage is also recorded in NVS.
+These small records are not a continuous log of every packet. They include
+firmware version, uptime, phase, memory and the last Wi-Fi failure reason.
+
+Open **Information > Recovery diagnostics (JSON)**, or `/diag`, to read the
+guard status and the last incident. **Download saved crash report**, or
+`/crash.bin`, downloads an existing ESP32 core dump without erasing it. A 404
+means no readable saved crash is available. These endpoints use the same
+authentication setting as the WebUI. A dump can contain sensitive RAM data;
+keep it private and pair it with the exact firmware ELF for decoding.
+
+The revision also fixes an out-of-bounds terminator on long serial log lines,
+overlapping log-buffer writes, unchecked console mutex
+failures, a BLE WebUI pause that could remain set, concurrent uptime accounting,
+rollover-unsafe periodic timers and a shared-queue race during restart. BLE scans
+pause during Wi-Fi recovery and resume afterwards. Routine BLE logs remain at
+verbose level.
+
+Web responses use bounded 512-byte socket writes with an eight-second deadline
+per write call, retrying temporary network-buffer pressure and short writes.
+This avoids the bundled core's unchecked short-write path. HTTP tests on the
+intermediate revision reproduced truncated GPIO pages without a device reboot.
+
+These fixes address verified source defects. The September 13 outage was not
+captured before power cycling, so it cannot be assigned to one specific defect.
+After that power cycle, the device recorded 14 Wi-Fi disconnection events with
+a final four-way-handshake timeout; those events belong to the new boot.
+
+### Test coverage
+
+Revision 4 adds native regression tests for queue allocation failures, full
+queues, serialization failure, FIFO ownership and 100,000 wrap iterations;
+bounded console buffers including long lines and malformed input; and the
+runtime heartbeat timeout including the millisecond counter rollover. Socket
+tests cover partial writes, transient errors, byte order and bounded timeouts.
+No test can establish zero bugs or replace a multi-day deployment soak.
+
 Both custom environments and the unchanged upstream `esp32dev-multi_receiver`
 environment compile successfully. The BLE image
 was exercised on an ESP32-D0WD-V3 with a CP2102 interface and CC1101 at

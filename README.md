@@ -52,10 +52,19 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
-* [Firmware with BLE](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble)
-* [Firmware without BLE](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble)
+* [Firmware with BLE — reliability update, pre-release](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble-r5)
+* [Firmware without BLE — reliability update, pre-release](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble-r5)
 
 ## Firmware variants
+
+**The September reliability update is a pre-release, not a confirmed stable
+release.** A later BLE outage is still unexplained; see the validation notes
+below. The previous published releases remain available while testing continues.
+
+Reliability revision 5 adds checked MQTT queue allocations, recovery from a stalled main loop, persistent
+incident diagnostics and a downloadable crash report. It also fixes console
+buffer concurrency, BLE pause recovery and long-running timers. See the
+[diagnostics and validation notes](docs/use/mqtt-wol.md#reliability-revision-5-september-2026).
 
 | Variant | Intended use |
 | --- | --- |

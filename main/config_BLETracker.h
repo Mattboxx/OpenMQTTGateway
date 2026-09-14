@@ -59,6 +59,7 @@ extern void stopBLETracker(bool deinitRadio);
 extern bool isBLETrackerStarting();
 extern bool pauseBLETrackerScanForWeb();
 extern void resumeBLETrackerScanAfterWeb();
+extern void setBLETrackerWiFiAvailable(bool available);
 extern String stateBLETrackerMeasures();
 
 #endif

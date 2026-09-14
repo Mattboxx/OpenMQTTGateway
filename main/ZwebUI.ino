@@ -22,16 +22,25 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "User_config.h"
+#include "RuntimeDiagnostics.h"
 #if defined(ZwebUI) && defined(ESP32)
 #  include <ArduinoJson.h>
 #  include <SPIFFS.h>
 #  include <Update.h>
 #  include <WebServer.h> // Docs for this are here - https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer
+#  ifdef OMG_RUNTIME_DIAGNOSTICS
+#    include <esp_core_dump.h>
+#    include <esp_partition.h>
+#  endif
 #  ifdef ZgatewayBLETracker
 #    include <esp_coexist.h>
 #  endif
 
 #  include "ArduinoLog.h"
+#  include "BoundedLogBuffer.h"
+#  include "BoundedSocketWrite.h"
+#  include <lwip/sockets.h>
+#  include <errno.h>
 #  include "config_WebContent.h"
 #  include "config_WebUI.h"
 
@@ -90,7 +99,9 @@ public:
       // this drain interval, and extend it when another client arrives.
       if (!_bleResumeAfter) _bleResumeAfter = millis() + 2000UL;
       if ((int32_t)(millis() - _bleResumeAfter) >= 0) {
-        if (_blePausedForRequest) resumeBLETrackerScanAfterWeb();
+        // Release the request even if scanning was already stopped, or the
+        // pause command failed. Otherwise the automatic resume stays inhibited.
+        resumeBLETrackerScanAfterWeb();
         esp_err_t preferenceResult = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
         if (preferenceResult != ESP_OK) {
           Log.warning(F("[WebUI] unable to restore balanced WiFi/BLE coexistence error=%d" CR), preferenceResult);
@@ -104,6 +115,32 @@ public:
   }
 
 protected:
+  size_t _currentClientWrite(const char* data, size_t length) override {
+    // This core's WebServer ignores short writes and WiFiClient::write closes
+    // the socket on ENOMEM. Retry temporary lwIP pressure in small chunks,
+    // without copying the response or blocking indefinitely.
+    const int socket = _currentClient.fd();
+    if (socket < 0) return 0;
+    const size_t sent = writeBoundedResponse(data, length,
+      [&](const char* bytes, size_t count) -> int {
+        const int result = ::send(socket, bytes, count, MSG_DONTWAIT);
+        if (result >= 0) return result;
+        return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOMEM ||
+                       errno == ENOBUFS || errno == EINTR ? 0 : -1;
+      }, []() { return millis(); }, [](unsigned ms) { delay(ms); });
+    if (sent != length) {
+      Log.warning(F("[WebUI] incomplete response sent=%u expected=%u heap=%u" CR),
+                  (unsigned)sent, (unsigned)length, ESP.getFreeHeap());
+      _currentClient.stop();
+    }
+    return sent;
+  }
+
+  size_t _currentClientWrite_P(PGM_P data, size_t length) override {
+    // ESP32 flash is memory mapped; the same bounded path handles PROGMEM.
+    return _currentClientWrite(data, length);
+  }
+
 #  ifdef ZgatewayBLETracker
   bool _blePausedForRequest = false;
   bool _webRadioGuardActive = false;
@@ -155,9 +192,9 @@ boolean displayMetric = DISPLAY_METRIC;
 // - name is used in serial log of mutex deadlock.
 // - maxWait in ticks is how long it will wait before failing in a deadlock scenario (and then emitting on serial)
 class TasAutoMutex {
-  SemaphoreHandle_t mutex;
-  bool taken;
-  int maxWait;
+  SemaphoreHandle_t mutex = nullptr;
+  bool taken = false;
+  int maxWait = 40;
   const char* name;
 
 public:
@@ -166,6 +203,7 @@ public:
   void give();
   void take();
   static void init(SemaphoreHandle_t* ptr);
+  bool locked() const { return taken; }
 };
 //////////////////////////////////////////
 
@@ -177,7 +215,7 @@ TasAutoMutex::TasAutoMutex(SemaphoreHandle_t* mutex, const char* name, int maxWa
     this->mutex = *mutex;
     this->maxWait = maxWait;
     this->name = name;
-    if (take) {
+    if (take && this->mutex) {
       this->taken = xSemaphoreTakeRecursive(this->mutex, this->maxWait);
       //      if (!this->taken){
       //        Serial.printf("\r\nMutexfail %s\r\n", this->name);
@@ -198,6 +236,7 @@ TasAutoMutex::~TasAutoMutex() {
 }
 
 void TasAutoMutex::init(SemaphoreHandle_t* ptr) {
+  if (*ptr) return;
   SemaphoreHandle_t mutex = xSemaphoreCreateRecursiveMutex();
   (*ptr) = mutex;
   // needed, else for ESP8266 as we will initialis more than once in logging
@@ -296,60 +335,10 @@ String HtmlEscape(const String unescaped) {
 }
 
 void AddLogData(uint32_t loglevel, const char* log_data, const char* log_data_payload = nullptr, const char* log_data_retained = nullptr) {
-  // Store log_data in buffer
-  // To lower heap usage log_data_payload may contain the payload data from MqttPublishPayload()
-  //  and log_data_retained may contain optional retained message from MqttPublishPayload()
-#  ifdef ESP32
-  // this takes the mutex, and will be release when the class is destroyed -
-  // i.e. when the functon leaves  You CAN call mutex.give() to leave early.
   TasAutoMutex mutex((SemaphoreHandle_t*)&log_buffer_mutex);
-#  endif // ESP32
-
-  char empty[2] = {0};
-  if (!log_data_payload) {
-    log_data_payload = empty;
-  }
-  if (!log_data_retained) {
-    log_data_retained = empty;
-  }
-
-  if (!log_buffer) {
-    return;
-  } // Leave now if there is no buffer available
-
-  // Delimited, zero-terminated buffer of log lines.
-  // Each entry has this format: [index][loglevel][log data]['\1']
-
-  // Truncate log messages longer than MAX_LOGSZ which is the log buffer size minus 64 spare
-  uint32_t log_data_len = strlen(log_data) + strlen(log_data_payload) + strlen(log_data_retained);
-  char too_long[TOPSZ];
-  if (log_data_len > MAX_LOGSZ) {
-    snprintf_P(too_long, sizeof(too_long) - 20, PSTR("%s%s"), log_data, log_data_payload); // 20 = strlen("... 123456 truncated")
-    snprintf_P(too_long, sizeof(too_long), PSTR("%s... %d truncated"), too_long, log_data_len);
-    log_data = too_long;
-    log_data_payload = empty;
-    log_data_retained = empty;
-  }
-
-  log_buffer_pointer &= 0xFF;
-  if (!log_buffer_pointer) {
-    log_buffer_pointer++; // Index 0 is not allowed as it is the end of char string
-  }
-  while (log_buffer_pointer == log_buffer[0] || // If log already holds the next index, remove it
-         strlen(log_buffer) + strlen(log_data) + strlen(log_data_payload) + strlen(log_data_retained) + 4 > LOG_BUFFER_SIZE) // 4 = log_buffer_pointer + '\1' + '\0'
-  {
-    char* it = log_buffer;
-    it++; // Skip log_buffer_pointer
-    it += strchrspn(it, '\1'); // Skip log line
-    it++; // Skip delimiting "\1"
-    memmove(log_buffer, it, LOG_BUFFER_SIZE - (it - log_buffer)); // Move buffer forward to remove oldest log line
-  }
-  snprintf_P(log_buffer, LOG_BUFFER_SIZE, PSTR("%s%c%c%s%s%s%s\1"),
-             log_buffer, log_buffer_pointer++, '0' + loglevel, "", log_data, log_data_payload, log_data_retained);
-  log_buffer_pointer &= 0xFF;
-  if (!log_buffer_pointer) {
-    log_buffer_pointer++; // Index 0 is not allowed as it is the end of char string
-  }
+  if (!mutex.locked()) return; // A dropped line is safer than concurrent corruption.
+  appendBoundedLog(log_buffer, LOG_BUFFER_SIZE, log_buffer_pointer, loglevel,
+                   log_data, log_data_payload, log_data_retained);
 }
 
 bool NeedLogRefresh(uint32_t req_loglevel, uint32_t index) {
@@ -364,6 +353,7 @@ bool NeedLogRefresh(uint32_t req_loglevel, uint32_t index) {
 #  endif // ESP32
 
   // Skip initial buffer fill
+  if (!mutex.locked()) return false;
   if (strlen(log_buffer) < LOG_BUFFER_SIZE / 2) {
     return false;
   }
@@ -395,18 +385,23 @@ bool GetLog(uint32_t req_loglevel, uint32_t* index_p, char** entry_pp, size_t* l
   TasAutoMutex mutex((SemaphoreHandle_t*)&log_buffer_mutex);
 #  endif // ESP32
 
+  if (!mutex.locked()) return false;
+  index &= 255;
   if (!index) { // Dump all
-    index = log_buffer[0];
+    index = static_cast<uint8_t>(log_buffer[0]);
   }
+  if (!index || index == log_buffer_pointer) return false;
 
   do {
     size_t len = 0;
     uint32_t loglevel = 0;
     char* entry_p = log_buffer;
     do {
-      uint32_t cur_idx = *entry_p;
+      uint32_t cur_idx = static_cast<uint8_t>(*entry_p);
       entry_p++;
-      size_t tmp = strchrspn(entry_p, '\1');
+      const char* delimiter = static_cast<const char*>(memchr(entry_p, '\1', log_buffer + LOG_BUFFER_SIZE - entry_p));
+      if (!delimiter) return false;
+      size_t tmp = delimiter - entry_p;
       tmp++; // Skip terminating '\1'
       if (cur_idx == index) { // Found the requested entry
         loglevel = *entry_p - '0';
@@ -2228,6 +2223,9 @@ void handleIN() {
     response += String(style);
     snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, information_body, jsonChar, gateway_name);
     response += String(buffer);
+#  ifdef OMG_RUNTIME_DIAGNOSTICS
+    response += F("<p><a href='/diag'>Recovery diagnostics (JSON)</a> &middot; <a href='/crash.bin'>Download saved crash report</a></p>");
+#  endif
 
     snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, footer, OMG_VERSION);
     response += String(buffer);
@@ -2534,6 +2532,13 @@ void handleCS() {
     constexpr size_t CONSOLE_RESPONSE_PAYLOAD_MAX = 1800;
     String payload;
     payload.reserve(CONSOLE_RESPONSE_PAYLOAD_MAX + 1);
+    // GetLog returns pointers into a movable buffer. Keep the mutex until the
+    // selected entries have been copied, but release it before network I/O.
+    TasAutoMutex snapshotLock((SemaphoreHandle_t*)&log_buffer_mutex);
+    if (!snapshotLock.locked()) {
+      server.send(503, "text/plain", "Console busy; retry");
+      return;
+    }
     uint32_t responseIndex = index ? index : log_buffer_pointer;
     bool cflg = (index);
     char* line;
@@ -2556,6 +2561,7 @@ void handleCS() {
     String message = String(responseIndex) + "}1" + String(consoleWasInitialized) + "}1";
     message += payload;
     message += "}1";
+    snapshotLock.give();
     WEBUI_TRACE_LOG(F("[WebUI][Console] response bytes=%u next_index=%u heap=%u" CR),
                     message.length(), responseIndex, ESP.getFreeHeap());
     server.send(200, "text/plain", message);
@@ -2628,6 +2634,42 @@ void WebUISetup() {
   server.on("/", handleRoot); // Main Menu
 
   server.on("/in", handleIN); // Information
+#  ifdef OMG_RUNTIME_DIAGNOSTICS
+  server.on("/diag", HTTP_GET, []() {
+    WEBUI_SECURE
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", runtimeDiagnosticsJSON());
+  });
+  server.on("/crash.bin", HTTP_GET, []() {
+    WEBUI_SECURE
+    const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+    size_t address = 0, length = 0;
+    if (!partition || esp_core_dump_image_get(&address, &length) != ESP_OK ||
+        !length || length > partition->size || address != partition->address) {
+      server.send(404, "text/plain", "No saved crash report");
+      return;
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Content-Disposition", "attachment; filename=esp32-crash.bin");
+    server.setContentLength(length);
+    server.send(200, "application/octet-stream", "");
+    WiFiClient client = server.client();
+    const uint32_t started = millis();
+    uint8_t block[512];
+    for (size_t offset = 0; offset < length;) {
+      const size_t count = min(sizeof(block), length - offset);
+      if (millis() - started > 15000UL || !client.connected() ||
+          esp_partition_read(partition, offset, block, count) != ESP_OK ||
+          client.write(block, count) != count) {
+        client.stop();
+        return;
+      }
+      offset += count;
+      delay(1);
+    }
+    // Deliberately never erase a report after download.
+  });
+#  endif
   server.on("/cs", handleCS); // Console
 #  if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
   server.on("/up", handleUP); // Firmware Upgrade
@@ -2670,6 +2712,7 @@ void WebUISetup() {
   server.enableTcpNoDelay();
   Log.notice(F("[WebUI] TCP_NODELAY enabled" CR));
 
+  TasAutoMutex::init((SemaphoreHandle_t*)&log_buffer_mutex);
   Log.begin(LOG_LEVEL, &WebLog);
 
   Log.trace(F("[WebUI] displayMetric %T" CR), displayMetric);
@@ -3502,18 +3545,21 @@ void SerialWeb::begin() {
 Dummy virtual functions carried over from Serial
 */
 int SerialWeb::available(void) {
+  return 0;
 }
 
 /*
 Dummy virtual functions carried over from Serial
 */
 int SerialWeb::peek(void) {
+  return -1;
 }
 
 /*
 Dummy virtual functions carried over from Serial
 */
 int SerialWeb::read(void) {
+  return -1;
 }
 
 /*
@@ -3532,20 +3578,12 @@ size_t SerialWeb::write(const uint8_t* buffer, size_t size) {
 }
 
 char line[ROW_LENGTH];
-int lineIndex = 0;
+size_t lineIndex = 0;
 void addLog(const uint8_t* buffer, size_t size) {
-  for (int i = 0; i < size; i++) {
-    if (char(buffer[i]) == 10 | lineIndex > ROW_LENGTH - 2) {
-      if (char(buffer[i]) != 10) {
-        line[lineIndex++] = char(buffer[i]);
-      }
-      line[lineIndex++] = char(0);
-      AddLogData(1, (const char*)&line[0]);
-      lineIndex = 0;
-    } else {
-      line[lineIndex++] = char(buffer[i]);
-    }
-  }
+  TasAutoMutex mutex((SemaphoreHandle_t*)&log_buffer_mutex);
+  if (!mutex.locked()) return;
+  consumeLogBytes(line, sizeof(line), lineIndex, buffer, size,
+                  [](const char* text) { AddLogData(1, text); });
 }
 
 #endif
