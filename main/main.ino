@@ -27,7 +27,11 @@
 */
 #include "User_config.h"
 #include "RuntimeDiagnostics.h"
+#include "NetworkLiveness.h"
 #include "CheckedMessageQueue.h"
+#if defined(ESP32) && defined(OMG_WIFI_MEMORY_BUDGET)
+#  include <esp_heap_caps.h>
+#endif
 
 enum GatewayState {
   WAITING_ONBOARDING,
@@ -81,6 +85,9 @@ unsigned long receivedMessages = 0;
 int maxQueueLength = 0;
 #ifndef QueueSize
 #  define QueueSize 18
+#endif
+#ifndef QUEUE_MIN_FREE_HEAP
+#  define QUEUE_MIN_FREE_HEAP 8192U
 #endif
 
 /**
@@ -615,7 +622,12 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
   // Preserve working memory for MQTT, WebUI and the recovery path. All queue
   // admission and serialization happen under the same lock, with one checked
   // allocation instead of repeated, throwing std::string growth and copies.
-  const bool headroom = ESP.getFreeHeap() >= payloadBytes + 8192U;
+#if defined(ESP32) && defined(OMG_WIFI_MEMORY_BUDGET)
+  const size_t queueHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT);
+#else
+  const size_t queueHeap = ESP.getFreeHeap();
+#endif
+  const bool headroom = queueHeap >= payloadBytes + QUEUE_MIN_FREE_HEAP;
   const bool accepted = headroom && payloadBytes <= JSON_MSG_BUFFER_MAX &&
                         jsonQueue.tryPush(payloadBytes, [&](char* data, size_t capacity) {
                           return serializeJson(jsonDoc, data, capacity) == payloadBytes;
@@ -626,8 +638,8 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
   xSemaphoreGive(xQueueMutex);
 #endif
   if (!accepted && (dropped == 1 || dropped % 64 == 0))
-    Log.warning(F("[QUEUE] rejected bytes=%u current=%u blocked_total=%l heap=%u; allocation or capacity unavailable" CR),
-                (unsigned int)payloadBytes, (unsigned int)sizeAfterPush, dropped, ESP.getFreeHeap());
+    Log.warning(F("[QUEUE] rejected bytes=%u current=%u blocked_total=%l heap=%u usable=%u; allocation or capacity unavailable" CR),
+                (unsigned int)payloadBytes, (unsigned int)sizeAfterPush, dropped, ESP.getFreeHeap(), (unsigned int)queueHeap);
   Log.trace(F("Queue length: %u" CR), (unsigned int)sizeAfterPush);
   return accepted;
 }
@@ -2037,6 +2049,7 @@ void setup() {
 #endif
   Log.notice(F("************** Setup OpenMQTTGateway end **************" CR));
   runtimeDiagnosticsBegin();
+  networkLivenessBegin();
 }
 
 // Bypass for ESP not reconnecting automaticaly the second time https://github.com/espressif/arduino-esp32/issues/2501
@@ -3252,6 +3265,8 @@ void loop() {
   }
   unsigned long now = millis();
 
+  networkLivenessLoop();
+
 #ifdef ESP32
   // Some repeaters expose a provisional DHCP address before restoring the
   // previous lease. Record silent address changes even when WiFi never emits a
@@ -3612,10 +3627,15 @@ String stateMeasures() {
   const uint32_t lowMemoryNow = millis();
   const bool lowMemoryCheckDue = !lastLowMemoryCheck ||
                                  lowMemoryNow - lastLowMemoryCheck >= RTL433_LOW_MEMORY_CHECK_INTERVAL_MS;
-  if (!stateSnapshotOnly && freeMem >= RTL433_LOW_MEMORY_THRESHOLD) {
+#  if defined(ESP32) && defined(OMG_WIFI_MEMORY_BUDGET)
+  const uint32_t recoveryHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT);
+#  else
+  const uint32_t recoveryHeap = freeMem;
+#  endif
+  if (!stateSnapshotOnly && recoveryHeap >= RTL433_LOW_MEMORY_THRESHOLD) {
     if (lowMemoryChecks) {
       Log.notice(F("[MEM] heap recovered current=%u threshold=%u previous_checks=%u" CR),
-                 freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks);
+                 recoveryHeap, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks);
       lowMemoryChecks = 0;
     }
   } else if (!stateSnapshotOnly && lowMemoryCheckDue) {
@@ -3625,17 +3645,23 @@ String stateMeasures() {
     lastLowMemoryCheck = lowMemoryNow;
     bool startupGrace = uptime() < RTL433_LOW_MEMORY_GRACE_SECONDS;
     bool queueBusy = queuedMessages != 0;
+#  if defined(ESP32) && defined(OMG_WIFI_MEMORY_BUDGET)
+    // A queue unable to drain due to real heap starvation must not suppress
+    // recovery forever. Spikes are already filtered by the one-minute samples
+    // and consecutive-check threshold; keep only the startup grace here.
+    queueBusy = false;
+#  endif
     if (startupGrace || queueBusy) {
       lowMemoryChecks = 0;
       Log.warning(F("[MEM] transient low heap=%u threshold=%u startup_grace=%T queue=%u; restart deferred" CR),
-                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, startupGrace, queuedMessages);
+                  recoveryHeap, RTL433_LOW_MEMORY_THRESHOLD, startupGrace, queuedMessages);
     } else {
       lowMemoryChecks++;
       Log.warning(F("[MEM] sustained low heap=%u threshold=%u check=%u/%u interval_ms=%u queue=%u" CR),
-                  freeMem, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks, RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS,
+                  recoveryHeap, RTL433_LOW_MEMORY_THRESHOLD, lowMemoryChecks, RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS,
                   RTL433_LOW_MEMORY_CHECK_INTERVAL_MS, queuedMessages);
       if (lowMemoryChecks >= RTL433_LOW_MEMORY_CONSECUTIVE_CHECKS) {
-        Log.error(F("[MEM] low-memory threshold persisted; restarting heap=%u" CR), freeMem);
+        Log.error(F("[MEM] low-memory threshold persisted; restarting heap=%u" CR), recoveryHeap);
         gatewayState = GatewayState::ERROR;
         ESPRestart(8);
       }
@@ -4017,7 +4043,8 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
       const char* url = HttpsFwUpdateData["url"];
       String systemUrl;
       if (url) {
-        if (!strstr((url + (strlen(url) - 5)), ".bin")) {
+        const size_t urlLength = strlen(url);
+        if (urlLength < 4 || strcmp(url + urlLength - 4, ".bin") != 0) {
           Log.error(F("Invalid firmware extension" CR));
           gatewayState = GatewayState::ERROR;
           return;
@@ -4059,6 +4086,10 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
       ProcessLock = true;
 #    ifdef ZgatewayBT
       stopProcessing(true);
+#    elif defined(ZgatewayBLETracker)
+      // Match local-file OTA: release controller RAM before HTTP/TLS buffers
+      // and the flash-update buffer are allocated. Every result restarts below.
+      stopBLETracker(true);
 #    endif
 #  endif
       Log.warning(F("Starting firmware update with %d freeHeap" CR), ESP.getFreeHeap());
@@ -4090,6 +4121,7 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
         WiFiClient update_client;
 #  ifdef ESP32
         httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        httpUpdate.rebootOnUpdate(false);
         result = httpUpdate.update(update_client, url);
 #  elif ESP8266
         ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);

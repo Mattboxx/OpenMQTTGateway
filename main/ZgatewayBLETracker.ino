@@ -56,6 +56,7 @@ static uint32_t bleTrackerMatchedAdvertisements;
 static volatile uint32_t bleTrackerDroppedReports;
 static bool bleTrackerPendingPublish[BLE_TRACKER_MAX];
 static uint8_t bleTrackerPendingReason[BLE_TRACKER_MAX];
+static uint32_t bleTrackerPublishRetryMs[BLE_TRACKER_MAX];
 static bool bleTrackerInitialStatePending[BLE_TRACKER_MAX];
 static uint32_t bleTrackerInitialStateSince[BLE_TRACKER_MAX];
 static bool bleTrackerWebPauseRequested;
@@ -513,7 +514,21 @@ static void enqueueBLETrackerState(uint8_t slot, const BLETrackerConfig_s& track
   state["name"] = tracker.name;
   state["last_seen"] = tracker.lastSeen / 1000UL;
   state["retain"] = true;
-  enqueueJsonObject(state, QueueSemaphoreTimeOutTask);
+  const bool queued = enqueueJsonObject(state, QueueSemaphoreTimeOutTask);
+  if (!queued) {
+    // Keep the latest logical state pending; a rejected OFF transition must
+    // not leave Home Assistant ON indefinitely. Retry without log flooding.
+    bleTrackerPublishRetryMs[slot] = millis();
+    if (xSemaphoreTake(bleTrackerMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (!bleTrackerPendingPublish[slot]) {
+        bleTrackerPendingPublish[slot] = true;
+        bleTrackerPendingReason[slot] = BLE_TRACKER_REASON_REFRESH;
+      }
+      xSemaphoreGive(bleTrackerMutex);
+    }
+  } else {
+    bleTrackerPublishRetryMs[slot] = 0;
+  }
   Log.verbose(F("[BLE][ADV] state slot=%u name=%s mac=%s presence=%T rssi=%d reason=%s heap=%u" CR),
              slot + 1, tracker.name, tracker.mac, tracker.present, tracker.lastRssi, reason, ESP.getFreeHeap());
 }
@@ -626,6 +641,13 @@ static bool startBLETrackerRadio() {
   bleTrackerStarted = true;
   bleTrackerHciState = BLE_HCI_SEND_RESET;
   bleTrackerInitGuard = 0;
+  // Presence tracking is best-effort; the gateway's Wi-Fi/MQTT transport is
+  // not. Bias coexistence toward Wi-Fi while allowing advertisements during
+  // radio idle periods; this does not prove BLE caused past beacon timeouts.
+  const esp_err_t coexistResult = esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+  if (coexistResult != ESP_OK)
+    Log.warning(F("[BLE][ADV] unable to prefer WiFi error=%s (%d)" CR),
+                esp_err_to_name(coexistResult), coexistResult);
   Log.verbose(F("[BLE][ADV] controller ready heap_before=%u heap_after=%u consumed=%u max_alloc=%u" CR),
              heapBefore, heapAfter, heapBefore - heapAfter, ESP.getMaxAllocHeap());
   return true;
@@ -783,7 +805,7 @@ void setBLETrackerWiFiAvailable(bool available) {
   if (!bleTrackerWiFiPaused) return;
   bleTrackerWiFiPaused = false;
   if (!bleTrackerWebPauseRequested) {
-    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
     // Retry asynchronously from loopBLETracker; never reinitialize the radio.
     bleTrackerLastResumeAttempt = millis() - 5000UL;
   }
@@ -792,6 +814,7 @@ void setBLETrackerWiFiAvailable(bool available) {
 static void publishBLETrackerChanges() {
   uint32_t now = millis();
   for (uint8_t slot = 0; slot < BLE_TRACKER_MAX; slot++) {
+    if (bleTrackerPublishRetryMs[slot] && now - bleTrackerPublishRetryMs[slot] < 1000UL) continue;
     BLETrackerConfig_s copy = {};
     const char* reason = nullptr;
     if (xSemaphoreTake(bleTrackerMutex, pdMS_TO_TICKS(20)) == pdFALSE) return;
@@ -867,6 +890,21 @@ void loopBLETracker() {
     if (!setBLETrackerScanEnabledForWeb(true))
       Log.warning(F("[BLE][ADV] automatic scan resume deferred; retrying in 5 seconds" CR));
   }
+}
+
+BLETrackerRuntimeSnapshot_s getBLETrackerRuntimeSnapshot() {
+  BLETrackerRuntimeSnapshot_s result = {};
+  result.started = bleTrackerStarted;
+  result.starting = bleTrackerStarting;
+  result.blocked = bleTrackerRuntimeBlocked;
+  result.scanning = bleTrackerScanning;
+  result.pausedWeb = bleTrackerWebPauseRequested;
+  result.pausedWiFi = bleTrackerWiFiPaused;
+  result.advertisements = bleTrackerAdvertisements;
+  result.matched = bleTrackerMatchedAdvertisements;
+  result.dropped = bleTrackerDroppedReports;
+  result.pending = bleTrackerReportQueue ? uxQueueMessagesWaiting(bleTrackerReportQueue) : 0;
+  return result;
 }
 
 String stateBLETrackerMeasures() {

@@ -43,6 +43,9 @@
 #    define HTTP_UE_BIN_VERIFY_HEADER_FAILED (-106)
 #    define HTTP_UE_BIN_FOR_WRONG_FLASH      (-107)
 #    define HTTP_UE_NO_PARTITION             (-108)
+#    define HTTP_UE_UPDATE_BEGIN_FAILED      (-109)
+#    define HTTP_UE_TRANSFER_FAILED          (-110)
+#    define HTTP_UE_HEADER_TIMEOUT           (-111)
 
 enum HTTPUpdateResult {
   HTTP_UPDATE_FAILED,
@@ -92,9 +95,9 @@ public:
 
 protected:
   t_httpUpdate_return handleUpdate(HTTPClient& http, const String& currentVersion, bool spiffs = false);
-  bool runUpdate(Stream& in, uint32_t size, String md5, int command = U_FLASH);
+  bool runUpdate(WiFiClient& in, uint32_t size, String md5, int command = U_FLASH);
 
-  int _lastError;
+  int _lastError = 0;
   bool _rebootOnUpdate = true;
 
 private:

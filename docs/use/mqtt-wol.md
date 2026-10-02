@@ -278,8 +278,14 @@ the emergency guard: heap-lock acquisition and normal radio shutdown callbacks.
 It uses cached memory samples and the pinned IDF's low-level emergency restart
 when preserving an existing dump. This hardens recovery but does not establish
 the cause of the offline event or prove recovery from every failure.
-The new offline event has not yet been diagnosed. Do not interpret the fixes
-below as proof of multi-day stability or publish this candidate as final.
+The later multi-day offline event was reported only after the device had been
+restarted, so it has no matching live log. Source review did identify a strong
+memory-pressure candidate: RTL_433 Home Assistant discovery kept every unique
+device/field in separately allocated heap objects without any limit or cleanup.
+Nearby transmitters and identifiers that change over time could therefore leave
+permanent allocations and increasingly fragmented heap. This fits the earlier
+confirmed `std::bad_alloc`, although the missing outage log means it cannot be
+proven to be the sole cause.
 
 Revision 5 was installed by local OTA and checked with light HTTP requests:
 MQTT connected, BLE advertisements and matches advancing, GPIO page and BLE
@@ -292,23 +298,93 @@ A saved crash decoded against its exact original ELF confirmed an uncaught
 `std::bad_alloc` while `stateMeasures()` serialized a system MQTT message into
 the outgoing queue. The queue now uses fixed slots and one checked payload
 allocation: exhaustion, a full queue or failed serialization reject the message
-and increment `msgblck` instead of throwing. Admission preserves 8 KiB of heap
-headroom; this is a precaution, not a guarantee that other allocations succeed.
+and increment `msgblck` instead of throwing. The custom presets now preserve
+24,000 bytes of heap on queue admission (the generic default remains 8 KiB).
+This is a precaution, not a guarantee that other allocations succeed.
 The cause of the preceding memory pressure has not yet been established.
 The saved panic occurred after the initial outage and does not prove that the
 initial outage had the same cause.
 
-Both custom variants include a runtime progress guard. If the main loop or an
-OTA write stops making progress for 120 seconds, an independent task records
-the stalled phase and requests recovery without waiting for MQTT or the log
-subsystem. Active OTA writes refresh progress. The runtime guard complements
-the existing startup guard; it is not a guarantee against every hardware or
-radio failure.
+Both custom variants include a two-level runtime progress guard. If the main
+loop or an OTA write stops making progress for 120 seconds, an independent task
+records the stalled phase and requests recovery without waiting for MQTT or the
+log subsystem. A second RTC hardware watchdog is fed only by real main-loop or
+OTA progress. It performs a full reset after 180 seconds even if FreeRTOS, a CPU
+core or the radio/Wi-Fi driver is too blocked to schedule the software guard.
+Active OTA writes refresh both guards.
+
+The custom presets also ping the DHCP default gateway once per minute. Three
+consecutive failures force a Wi-Fi reassociation even if the ESP32 driver still
+reports `WL_CONNECTED`. This covers the otherwise invisible state where the
+main loop remains healthy while both WebUI and MQTT have disappeared from the
+LAN. It is independent of MQTT, so a deliberately powered-off broker can still
+remain offline for WOL without causing firmware restart loops. `/diag` reports
+the target, replies, timeouts and recovery count.
+
+On 1 October 2026, a new saved panic from `r6-test2` was decoded against its
+archived ELF. The complete checksum-verified report showed
+`tcpip_thread -> sys_check_timeouts -> tcpip_tcp_timer ->
+sys_timeout_abs`, ending in `MEMP_SYS_TIMEOUT is empty`. The pinned SDK uses
+`MEMP_MEM_MALLOC=1`, so this means a timer allocation failed in the shared heap,
+not simply that a configurable fixed timer count was reached. The precise
+allocation that consumed the remaining memory was not recorded.
+
+The custom presets now use linker wrapping to reserve 32 statically allocated
+`sys_timeo` objects. This intercepts timer allocation and freeing from the
+precompiled lwIP archive, while leaving other network pools on their SDK
+allocator. The object size is checked against the linked SDK before use;
+unexpected capacity exhaustion falls back to the original allocator and is
+counted. `/diag` reports `timer_reserve`, capacity, current/peak usage and
+fallbacks. It also records failed heap allocations without logging or allocating
+from the failure callback. This targets the confirmed panic path but does not
+prove that every historical outage shared that cause.
+`alloc_trace_pc`, `alloc_trace_task`, `alloc_trace_ms`, `alloc_trace_bytes` and
+`alloc_trace_caps` identify the latest throttled allocation-failure call path.
+Decode those program addresses using the exact deployed firmware ELF; they
+are captured at most once every ten seconds, without filling normal logs.
+The raw failure counter includes unsuccessful preferred-allocation attempts
+which can sometimes be followed by a successful fallback.
+
+The test4 trace identified failed Wi-Fi receive-buffer allocations. Custom
+presets therefore limit dynamic Wi-Fi RX/TX buffers to 2/2, static RX buffers
+to 2, and the receive Block Ack window to 2. AMPDU receive/transmit aggregation
+is disabled on these low-throughput presets: Espressif recommends disabling it
+when using fewer than six static RX buffers. This saves approximately 3.2 KB
+of permanently allocated DMA memory versus Arduino's four static RX buffers,
+as well as bounding dynamic packet bursts. Static TX buffers, SDK callbacks,
+security settings and initialization magic remain untouched. These limits favor memory
+headroom over bulk transfer throughput. `/diag` reports whether the budget was
+accepted and the configured limits. `heap_default`, `min_heap_default` and
+`max_alloc_default` measure the allocation capabilities actually requested by
+these packet buffers; Arduino's broader internal-memory metrics include RAM
+which cannot satisfy ordinary byte-addressable allocations. See
+[Espressif's buffer guidance](https://docs.espressif.com/projects/esp-idf/en/v4.4/esp32/api-guides/wifi.html#wi-fi-buffer-usage).
+Connected discovery announcements in these presets are sent one at a time
+from the main task instead of accumulating the full startup batch in the queue.
+Queue admission reserves 12 KB in that usable allocation class; sustained
+low-memory recovery uses a 6 KB threshold. A permanently blocked queue cannot
+defer recovery indefinitely. BLE/GPIO state messages rejected by the queue
+remain pending and retry their latest state once per second, without repeating
+physical GPIO actions.
+WebUI sends also leave 6 KB of byte-addressable RX headroom and a contiguous
+RX-sized block before enqueueing another outbound chunk. Slow-client retries
+remain bounded; incoming TCP ACKs need memory to reclaim outgoing buffers.
+
+RTL_433 discovery now uses 32 fixed records and a statically allocated mutex:
+received radio data can no longer grow this part of the heap. Pending discovery
+records are protected; after publication, the least-recently-seen record can be
+reused. Oversized or excess identities are safely ignored and counted. RF state
+reports expose `rtl433_discovery_cached`, `rtl433_discovery_capacity`,
+`rtl433_discovery_dropped` and `rtl433_discovery_evicted`. The WebUI message
+formatter also extracts topic names without its former per-message
+`strdup`/`strtok` allocation.
 
 On the next warm boot, a stalled-loop incident is copied from RTC memory to NVS.
-The first failed Wi-Fi recovery window in an outage is also recorded in NVS.
-These small records are not a continuous log of every packet. They include
-firmware version, uptime, phase, memory and the last Wi-Fi failure reason.
+The first failed Wi-Fi recovery window in an outage is recorded in a separate
+NVS slot, so it can no longer overwrite the more important stalled-loop or
+hardware-watchdog evidence. These small records are not a continuous log of
+every packet. They include firmware version, uptime, phase, memory and the last
+Wi-Fi failure reason.
 
 Open **Information > Recovery diagnostics (JSON)**, or `/diag`, to read the
 guard status and the last incident. **Download saved crash report**, or
@@ -316,6 +392,11 @@ guard status and the last incident. **Download saved crash report**, or
 means no readable saved crash is available. These endpoints use the same
 authentication setting as the WebUI. A dump can contain sensitive RAM data;
 keep it private and pair it with the exact firmware ELF for decoding.
+For a slow VPN, `/crash.bin?offset=0&size=1024` retrieves an individually
+retryable slice (maximum 4096 bytes). Concatenate slices in increasing offset
+order and verify the complete dump's checksum before treating it as complete.
+An IP routed by Tailscale may work even when `.local` multicast name resolution
+does not; partial remote HTTP transfers alone do not establish a radio fault.
 
 The revision also fixes an out-of-bounds terminator on long serial log lines,
 overlapping log-buffer writes, unchecked console mutex
@@ -323,6 +404,9 @@ failures, a BLE WebUI pause that could remain set, concurrent uptime accounting,
 rollover-unsafe periodic timers and a shared-queue race during restart. BLE scans
 pause during Wi-Fi recovery and resume afterwards. Routine BLE logs remain at
 verbose level.
+The BLE preset keeps Wi-Fi preferred in the coexistence scheduler, including
+after WebUI requests; advertisements remain best-effort. Beacon timeouts were
+observed, but the available evidence does not prove BLE caused them.
 
 Web responses use bounded 512-byte socket writes with an eight-second deadline
 per write call, retrying temporary network-buffer pressure and short writes.
@@ -336,11 +420,13 @@ a final four-way-handshake timeout; those events belong to the new boot.
 
 ### Test coverage
 
-Revision 4 adds native regression tests for queue allocation failures, full
+The reliability branch includes native regression tests for queue allocation failures, full
 queues, serialization failure, FIFO ownership and 100,000 wrap iterations;
 bounded console buffers including long lines and malformed input; and the
-runtime heartbeat timeout including the millisecond counter rollover. Socket
-tests cover partial writes, transient errors, byte order and bounded timeouts.
+runtime heartbeat timeout including the millisecond counter rollover. The fixed
+discovery-cache test covers capacity exhaustion, protection of pending records,
+safe eviction and clock rollover. Socket tests cover partial writes, transient
+errors, byte order and bounded timeouts.
 No test can establish zero bugs or replace a multi-day deployment soak.
 
 Both custom environments and the unchanged upstream `esp32dev-multi_receiver`

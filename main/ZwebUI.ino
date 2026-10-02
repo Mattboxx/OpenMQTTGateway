@@ -39,6 +39,10 @@
 #  include "ArduinoLog.h"
 #  include "BoundedLogBuffer.h"
 #  include "BoundedSocketWrite.h"
+#  ifdef OMG_WIFI_MEMORY_BUDGET
+#    include "SocketMemoryBudget.h"
+#    include <esp_heap_caps.h>
+#  endif
 #  include <lwip/sockets.h>
 #  include <errno.h>
 #  include "config_WebContent.h"
@@ -71,6 +75,21 @@ public:
   }
 
   void handleClient() override {
+#  ifdef OMG_WEB_UPLOAD_TIMEOUT
+    // Arduino 2.0.7 sets the socket/Stream timeout only AFTER _parseRequest,
+    // which also consumes multipart uploads. They otherwise inherit Stream's
+    // one-second idle timeout and abort on brief radio/retransmission delays.
+    // Accept exactly as the base server does, but set its seconds-based timeout
+    // before parsing. The pinned parser already retries transient reads.
+    if (_currentStatus == HC_NONE && _server.hasClient()) {
+      _currentClient = _server.available();
+      if (_currentClient) {
+        _currentStatus = HC_WAIT_READ;
+        _statusChange = millis();
+        _currentClient.setTimeout(10);
+      }
+    }
+#  endif
 #  ifdef ZgatewayBLETracker
     // The ESP32 uses one 2.4 GHz radio for Wi-Fi and BLE. Pause passive BLE
     // scanning for the complete lifetime of an HTTP client, including the
@@ -102,9 +121,12 @@ public:
         // Release the request even if scanning was already stopped, or the
         // pause command failed. Otherwise the automatic resume stays inhibited.
         resumeBLETrackerScanAfterWeb();
-        esp_err_t preferenceResult = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        // Presence scanning is best-effort. Keep Wi-Fi preferred after the
+        // request too, reducing radio competition. Recorded beacon timeouts
+        // alone do not establish that the BLE scanner caused an outage.
+        esp_err_t preferenceResult = esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
         if (preferenceResult != ESP_OK) {
-          Log.warning(F("[WebUI] unable to restore balanced WiFi/BLE coexistence error=%d" CR), preferenceResult);
+          Log.warning(F("[WebUI] unable to retain WiFi/BLE coexistence priority error=%d" CR), preferenceResult);
         }
         _blePausedForRequest = false;
         _webRadioGuardActive = false;
@@ -123,11 +145,31 @@ protected:
     if (socket < 0) return 0;
     const size_t sent = writeBoundedResponse(data, length,
       [&](const char* bytes, size_t count) -> int {
+#  ifdef OMG_WIFI_MEMORY_BUDGET
+        // TCP send buffers and Wi-Fi RX share this allocator. Wait before
+        // exhausting it, not only after send() fails: ACK reception also
+        // requires heap. Broad ESP.getFreeHeap() includes unusable regions.
+        constexpr uint32_t packetCaps = MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL;
+        if (!socketWriteHasHeadroom(heap_caps_get_free_size(packetCaps),
+                                    heap_caps_get_largest_free_block(packetCaps), count))
+          return 0;
+#  endif
         const int result = ::send(socket, bytes, count, MSG_DONTWAIT);
         if (result >= 0) return result;
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOMEM ||
                        errno == ENOBUFS || errno == EINTR ? 0 : -1;
-      }, []() { return millis(); }, [](unsigned ms) { delay(ms); });
+      }, []() { return millis(); }, [](unsigned ms) {
+#  ifdef OMG_WIFI_MEMORY_BUDGET
+        // Give RX/ACK processing an opportunity between accepted chunks too.
+        delay(ms < 10 ? 10 : ms);
+#  else
+        delay(ms);
+#  endif
+      });
+    // A slow client may make one complete WebUI response span many bounded
+    // chunks. Accepted bytes are genuine forward progress, so keep both
+    // runtime guards alive without masking a socket that makes no progress.
+    if (sent) runtimeProgress(RuntimePhase::Web);
     if (sent != length) {
       Log.warning(F("[WebUI] incomplete response sent=%u expected=%u heap=%u" CR),
                   (unsigned)sent, (unsigned)length, ESP.getFreeHeap());
@@ -2429,9 +2471,8 @@ void handleUP() {
       {
         sendRestartPage();
 
-        String output;
-        serializeJson(WEBtoSYS, output);
-        Log.notice(F("[WebUI] XtoSYSupdate %s" CR), output.c_str());
+        // WEBtoSYS also contains the OTA password. Never serialize it to logs.
+        Log.notice(F("[WebUI][OTA] custom URL update requested" CR));
       }
 
       String topic = String(mqtt_topic) + String(gateway_name) + String(subjectMQTTtoSYSupdate);
@@ -2445,9 +2486,7 @@ void handleUP() {
         {
           sendRestartPage();
 
-          String output;
-          serializeJson(WEBtoSYS, output);
-          Log.notice(F("[WebUI] XtoSYSupdate %s" CR), output.c_str());
+          Log.notice(F("[WebUI][OTA] release update requested level=%u" CR), le);
         }
 
         String topic = String(mqtt_topic) + String(gateway_name) + String(subjectMQTTtoSYSupdate);
@@ -2649,21 +2688,37 @@ void WebUISetup() {
       server.send(404, "text/plain", "No saved crash report");
       return;
     }
+    size_t firstByte = 0;
+    size_t responseLength = length;
+    if (server.hasArg("offset") || server.hasArg("size")) {
+      const long requestedOffset = server.hasArg("offset") ? server.arg("offset").toInt() : 0;
+      const long requestedSize = server.hasArg("size") ? server.arg("size").toInt() : 1024;
+      if (requestedOffset < 0 || (size_t)requestedOffset >= length || requestedSize <= 0 || requestedSize > 4096) {
+        server.send(416, "text/plain", "Invalid crash report slice");
+        return;
+      }
+      firstByte = (size_t)requestedOffset;
+      responseLength = min((size_t)requestedSize, length - firstByte);
+    }
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("Content-Disposition", "attachment; filename=esp32-crash.bin");
-    server.setContentLength(length);
+    server.setContentLength(responseLength);
     server.send(200, "application/octet-stream", "");
     WiFiClient client = server.client();
     const uint32_t started = millis();
     uint8_t block[512];
-    for (size_t offset = 0; offset < length;) {
-      const size_t count = min(sizeof(block), length - offset);
+    const size_t endByte = firstByte + responseLength;
+    for (size_t offset = firstByte; offset < endByte;) {
+      const size_t count = min(sizeof(block), endByte - offset);
       if (millis() - started > 15000UL || !client.connected() ||
-          esp_partition_read(partition, offset, block, count) != ESP_OK ||
-          client.write(block, count) != count) {
+          esp_partition_read(partition, offset, block, count) != ESP_OK) {
         client.stop();
         return;
       }
+      // Use the same checked, bounded writer as HTML responses. Small slices
+      // let diagnostic clients retry individual blocks over a slow VPN.
+      server.sendContent(reinterpret_cast<const char*>(block), count);
+      if (!client.connected()) return;
       offset += count;
       delay(1);
     }
@@ -2867,6 +2922,7 @@ constexpr unsigned int webUIHash(const char* s, int off = 0) { // workaround for
 Parse json message from module into a format for display
 */
 void webUIPubPrint(const char* topicori, JsonObject& data) {
+  if (!topicori) return;
   WEBUI_TRACE_LOG(F("[ webUIPubPrint ] pub %s " CR), topicori);
   if (webUIQueue) {
     webUIQueueMessage* message = (webUIQueueMessage*)heap_caps_calloc(1, sizeof(webUIQueueMessage), MALLOC_CAP_8BIT);
@@ -2876,9 +2932,20 @@ void webUIPubPrint(const char* topicori, JsonObject& data) {
       strlcpy(message->line2, "", WEBUI_TEXT_WIDTH);
       strlcpy(message->line3, "", WEBUI_TEXT_WIDTH);
       strlcpy(message->line4, "", WEBUI_TEXT_WIDTH);
-      char* topic = strdup(topicori);
-      strlcpy(message->title, strtok(topic, "/"), WEBUI_TEXT_WIDTH);
-      free(topic);
+      // Extract the first topic segment without strdup/strtok. This path runs
+      // for every displayed MQTT message and formerly fragmented the heap; a
+      // failed strdup also led to a null-pointer crash under memory pressure.
+      const char* titleStart = topicori;
+      while (*titleStart == '/') ++titleStart;
+      const char* titleEnd = strchr(titleStart, '/');
+      size_t titleLength = titleEnd ? (size_t)(titleEnd - titleStart) : strlen(titleStart);
+      if (titleLength >= WEBUI_TEXT_WIDTH) titleLength = WEBUI_TEXT_WIDTH - 1;
+      memcpy(message->title, titleStart, titleLength);
+      message->title[titleLength] = '\0';
+      if (!titleLength) {
+        free(message);
+        return;
+      }
 
       //  WEBUI_TRACE_LOG(F("[ webUIPubPrint ] switch %s " CR), message->title);
       switch (webUIHash(message->title)) {
@@ -3382,11 +3449,9 @@ void webUIPubPrint(const char* topicori, JsonObject& data) {
 
             if (!(line2 == "" && line3 == "" && line4 == "")) {
               // Titel
-              char* topic = strdup(topicori);
-              String heading = strtok(topic, "/");
+              String heading = message->title;
               String line0 = heading + "           " + data["id"].as<String>().substring(9, 17);
               line0.toCharArray(message->title, WEBUI_TEXT_WIDTH);
-              free(topic);
 
               // Line 1
               strlcpy(message->line1, data["model"], WEBUI_TEXT_WIDTH);

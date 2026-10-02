@@ -36,6 +36,8 @@ struct GPIOInputChannelState_s {
   unsigned long lastDebounceTime;
   int stableState;
   int previousReading;
+  bool publishPending;
+  unsigned long lastPublishAttempt;
 };
 
 GPIOInputChannelConfig_s gpioInputChannels[GPIO_INPUT_MAX] = {{true, INPUT_GPIO, "GPIOInput", GPIO_INPUT_DEFAULT_MODE, GPIO_INPUT_ACTIVE_LEVEL, GPIOInputDebounceDelay, GPIO_INPUT_RETAIN, GPIO_INPUT_CLASS_NONE}};
@@ -45,6 +47,8 @@ GPIOOutputChannelConfig_s gpioOutputChannels[GPIO_OUTPUT_MAX] = {};
 struct GPIOOutputChannelState_s {
   bool initialized;
   bool logicalOn;
+  bool publishPending;
+  unsigned long lastPublishAttempt;
 };
 
 GPIOOutputChannelState_s gpioOutputStates[GPIO_OUTPUT_MAX];
@@ -242,6 +246,8 @@ static bool publishGPIOOutputState(uint8_t channel, const char* reason) {
   output["retain"] = config.retainState;
   output["origin"] = gpioOutputTopic(channel);
   const bool queued = enqueueJsonObject(output);
+  gpioOutputStates[channel].publishPending = !queued;
+  gpioOutputStates[channel].lastPublishAttempt = millis();
   Log.notice(F("[GPIO] output state channel=%u name=%s pin=%u state=%s electrical=%s reason=%s retain=%T queued=%T mqtt_connected=%T" CR),
              channel + 1, config.name, config.pin, logicalOn ? "ON" : "OFF",
              digitalRead(config.pin) == HIGH ? "HIGH" : "LOW", reason,
@@ -266,6 +272,8 @@ void setupGPIOInput() {
     state.lastDebounceTime = millis();
     state.stableState = 3;
     state.previousReading = 3;
+    state.publishPending = false;
+    state.lastPublishAttempt = 0;
     if (!config.enabled) continue;
 
     const char* validationError = gpioInputPinValidationError(config.pin, config.mode);
@@ -431,6 +439,12 @@ void XtoGPIOOutput(const char* topicOri, JsonObject& data) {
 }
 
 void MeasureGPIOInput() {
+  for (uint8_t channel = 0; channel < GPIO_OUTPUT_MAX; channel++) {
+    const GPIOOutputChannelState_s& state = gpioOutputStates[channel];
+    if (gpioOutputChannels[channel].enabled && state.initialized && state.publishPending &&
+        millis() - state.lastPublishAttempt >= 1000UL)
+      publishGPIOOutputState(channel, "queue-retry");
+  }
   for (uint8_t channel = 0; channel < GPIO_INPUT_MAX; channel++) {
     GPIOInputChannelConfig_s& config = gpioInputChannels[channel];
     GPIOInputChannelState_s& state = gpioInputStates[channel];
@@ -471,7 +485,8 @@ void MeasureGPIOInput() {
       }
 #  endif
     // if the Input state has changed:
-      if (reading != state.stableState) {
+      const bool stableChanged = reading != state.stableState;
+      if (stableChanged || (state.publishPending && millis() - state.lastPublishAttempt >= 1000UL)) {
       const int previousStableState = state.stableState;
       StaticJsonDocument<JSON_MSG_BUFFER> GPIOdataBuffer;
       JsonObject GPIOdata = GPIOdataBuffer.to<JsonObject>();
@@ -488,6 +503,8 @@ void MeasureGPIOInput() {
       GPIOdata["retain"] = config.retainState;
       GPIOdata["origin"] = gpioInputTopic(channel);
       const bool queued = enqueueJsonObject(GPIOdata);
+      state.publishPending = !queued;
+      state.lastPublishAttempt = millis();
       Log.notice(F("[GPIO] stable change channel=%u name=%s pin=%u previous=%s current=%s active=%T retain=%T queued=%T mqtt_connected=%T queue=%d uptime_ms=%l" CR),
                  channel + 1, config.name, config.pin,
                  previousStableState == 3 ? "UNKNOWN" : (previousStableState == HIGH ? "HIGH" : "LOW"),
@@ -496,7 +513,7 @@ void MeasureGPIOInput() {
 
 #  if defined(ZactuatorONOFF) && defined(ACTUATOR_TRIGGER)
       //Trigger the actuator if we are not at startup
-      if (channel == 0 && state.stableState != 3) {
+      if (stableChanged && channel == 0 && state.stableState != 3) {
 #    if defined(ACTUATOR_BUTTON_TRIGGER_LEVEL)
         if (state.stableState == ACTUATOR_BUTTON_TRIGGER_LEVEL)
           ActuatorTrigger(); // Button press trigger

@@ -458,6 +458,20 @@ void createDiscovery(const char* sensor_type,
   Log.trace(F("Announce Device %s on  %s" CR), String(sensor_type).c_str(), topic.c_str());
   sensor["topic"] = topic;
   sensor["retain"] = true;
+#  ifdef OMG_DISCOVERY_STREAM
+  // These opt-in RF/BLE-observer presets create discovery on the main task.
+  // Stream each announcement rather than filling the queue with the entire
+  // startup batch and losing entities when memory admission rejects the tail.
+  // Never re-enter mqtt->loop() from its connected callback.
+  if (SYSConfig.mqtt && !SYSConfig.offline && mqtt && mqtt->connected()) {
+    runtimeProgress(RuntimePhase::MQTT);
+    if (jsonDispatch(sensor)) return;
+    // pub() consumes the topic/retain fields even on a failed send. Restore
+    // them before falling back to the queue, so a retry remains routable.
+    sensor["topic"] = topic;
+    sensor["retain"] = true;
+  }
+#  endif
   enqueueJsonObject(sensor);
 }
 

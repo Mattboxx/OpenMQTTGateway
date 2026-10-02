@@ -68,12 +68,18 @@ extern int getOOKThresh();
 
 #  ifdef ZmqttDiscovery
 extern void launchRTL_433Discovery(bool overrideDiscovery);
+extern unsigned int getRTLDiscoveryCacheCount();
+extern unsigned int getRTLDiscoveryCacheDropped();
+extern unsigned int getRTLDiscoveryCacheEvicted();
 // This structure stores the entities of the RTL 433 devices and is they have been discovered or not
 // The uniqueId is composed of the device id + the key
 
 #    define uniqueIdSize  60 // longest model + longest key
 #    define modelNameSize 31 // longest model
 #    define typeSize      10 // longest type
+#    ifndef RTL433_DISCOVERY_CACHE_SIZE
+#      define RTL433_DISCOVERY_CACHE_SIZE 32
+#    endif
 
 struct RTL_433device {
   char uniqueId[uniqueIdSize];

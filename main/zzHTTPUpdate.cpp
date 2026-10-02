@@ -26,6 +26,7 @@
 #  include "zzHTTPUpdate.h"
 
 #  include <StreamString.h>
+#  include "BoundedFirmwareTransfer.h"
 #  include <esp_ota_ops.h> // get running partition
 #  include <esp_partition.h>
 
@@ -48,6 +49,7 @@ HTTPUpdate::~HTTPUpdate(void) {
 HTTPUpdateResult HTTPUpdate::update(WiFiClient& client, const String& url, const String& currentVersion) {
   HTTPClient http;
   if (!http.begin(client, url)) {
+    _lastError = HTTPC_ERROR_CONNECTION_REFUSED;
     return HTTP_UPDATE_FAILED;
   }
   return handleUpdate(http, currentVersion, false);
@@ -60,6 +62,7 @@ HTTPUpdateResult HTTPUpdate::updateSpiffs(HTTPClient& httpClient, const String& 
 HTTPUpdateResult HTTPUpdate::updateSpiffs(WiFiClient& client, const String& url, const String& currentVersion) {
   HTTPClient http;
   if (!http.begin(client, url)) {
+    _lastError = HTTPC_ERROR_CONNECTION_REFUSED;
     return HTTP_UPDATE_FAILED;
   }
   return handleUpdate(http, currentVersion, true);
@@ -74,6 +77,7 @@ HTTPUpdateResult HTTPUpdate::update(WiFiClient& client, const String& host, uint
                                     const String& currentVersion) {
   HTTPClient http;
   if (!http.begin(client, host, port, uri)) {
+    _lastError = HTTPC_ERROR_CONNECTION_REFUSED;
     return HTTP_UPDATE_FAILED;
   }
   return handleUpdate(http, currentVersion, false);
@@ -128,6 +132,12 @@ String HTTPUpdate::getLastErrorString(void) {
       return "New Binary Does Not Fit Flash Size";
     case HTTP_UE_NO_PARTITION:
       return "Partition Could Not be Found";
+    case HTTP_UE_UPDATE_BEGIN_FAILED:
+      return "Unable to allocate/start flash update";
+    case HTTP_UE_TRANSFER_FAILED:
+      return "Firmware transfer stopped before completion";
+    case HTTP_UE_HEADER_TIMEOUT:
+      return "No firmware header received before timeout";
   }
 
   return String();
@@ -166,6 +176,7 @@ String getSketchSHA256() {
  */
 HTTPUpdateResult HTTPUpdate::handleUpdate(HTTPClient& http, const String& currentVersion, bool spiffs) {
   HTTPUpdateResult ret = HTTP_UPDATE_FAILED;
+  _lastError = 0;
 
   // use HTTP/1.0 for update since the update handler not support any transfer Encoding
   http.useHTTP10(true);
@@ -294,9 +305,13 @@ HTTPUpdateResult HTTPUpdate::handleUpdate(HTTPClient& http, const String& curren
 
             // check for valid first magic byte
             //                    if(buf[0] != 0xE9) {
-            if (tcp->peek() != 0xE9) {
+            const int firstByte = waitFirmwareHeader(
+                [&]() { return tcp->available(); }, [&]() { return tcp->peek(); },
+                [&]() { return tcp->connected(); }, []() { return millis(); },
+                [](unsigned ms) { delay(ms); });
+            if (firstByte != 0xE9) {
               log_e("Magic header does not start with 0xE9\n");
-              _lastError = HTTP_UE_BIN_VERIFY_HEADER_FAILED;
+              _lastError = firstByte < 0 ? HTTP_UE_HEADER_TIMEOUT : HTTP_UE_BIN_VERIFY_HEADER_FAILED;
               http.end();
               return HTTP_UPDATE_FAILED;
             }
@@ -362,11 +377,11 @@ HTTPUpdateResult HTTPUpdate::handleUpdate(HTTPClient& http, const String& curren
  * @param md5 String
  * @return true if Update ok
  */
-bool HTTPUpdate::runUpdate(Stream& in, uint32_t size, String md5, int command) {
+bool HTTPUpdate::runUpdate(WiFiClient& in, uint32_t size, String md5, int command) {
   StreamString error;
 
   if (!Update.begin(size, command, _ledPin, _ledOn)) {
-    _lastError = Update.getError();
+    _lastError = Update.getError() ? Update.getError() : HTTP_UE_UPDATE_BEGIN_FAILED;
     Update.printError(error);
     error.trim(); // remove line ending
     log_e("Update.begin failed! (%s)\n", error.c_str());
@@ -376,6 +391,7 @@ bool HTTPUpdate::runUpdate(Stream& in, uint32_t size, String md5, int command) {
   if (md5.length()) {
     if (!Update.setMD5(md5.c_str())) {
       _lastError = HTTP_UE_SERVER_FAULTY_MD5;
+      Update.abort();
       log_e("Update.setMD5 failed! (%s)\n", md5.c_str());
       return false;
     }
@@ -383,16 +399,24 @@ bool HTTPUpdate::runUpdate(Stream& in, uint32_t size, String md5, int command) {
 
   // To do: the SHA256 could be checked if the server sends it
 
-  if (Update.writeStream(in) != size) {
-    _lastError = Update.getError();
+  size_t written = 0;
+  const FirmwareTransferResult transfer = transferFirmware(size, written,
+      [&]() { return in.available(); }, [&]() { return in.connected(); },
+      [&](uint8_t* block, size_t count) { return in.read(block, count); },
+      [&](uint8_t* block, size_t count) { return Update.write(block, count); },
+      []() { return millis(); }, [](unsigned ms) { delay(ms); });
+  if (transfer != FirmwareTransferResult::Complete) {
+    _lastError = Update.getError() ? Update.getError() : HTTP_UE_TRANSFER_FAILED;
     Update.printError(error);
     error.trim(); // remove line ending
-    log_e("Update.writeStream failed! (%s)\n", error.c_str());
+    log_e("Firmware transfer failed result=%u bytes=%u/%u (%s)\n",
+          static_cast<unsigned>(transfer), static_cast<unsigned>(written), size, error.c_str());
+    if (Update.isRunning()) Update.abort();
     return false;
   }
 
   if (!Update.end()) {
-    _lastError = Update.getError();
+    _lastError = Update.getError() ? Update.getError() : HTTP_UE_TRANSFER_FAILED;
     Update.printError(error);
     error.trim(); // remove line ending
     log_e("Update.end failed! (%s)\n", error.c_str());

@@ -36,101 +36,112 @@
 #  include "User_config.h"
 #  ifdef ZmqttDiscovery
 #    include "config_mqttDiscovery.h"
+#    include "FixedDiscoveryCache.h"
 #  endif
 
 char messageBuffer[JSON_MSG_BUFFER];
 
 #  ifdef ZmqttDiscovery
 SemaphoreHandle_t semaphorecreateOrUpdateDeviceRTL_433;
-std::vector<RTL_433device*> RTL_433devices;
+StaticSemaphore_t semaphorecreateOrUpdateDeviceRTL_433Buffer;
+FixedDiscoveryCache<RTL_433device, RTL433_DISCOVERY_CACHE_SIZE> RTL_433devices;
 int newRTL_433Devices = 0;
+uint32_t droppedRTL_433Devices = 0;
+uint32_t evictedRTL_433Devices = 0;
+uint32_t lastRTL_433DiscoveryWarning = 0;
+bool hasRTL_433DiscoveryWarning = false;
 
-static RTL_433device NO_RTL_433_DEVICE_FOUND = {{0},
-                                                0,
-                                                false};
-
-RTL_433device* getDeviceById(const char* id); // Declared here to avoid pre-compilation issue (misplaced auto declaration by pio)
-RTL_433device* getDeviceById(const char* id) {
-  DISCOVERY_TRACE_LOG(F("getDeviceById %s" CR), id);
-
-  for (std::vector<RTL_433device*>::iterator it = RTL_433devices.begin(); it != RTL_433devices.end(); ++it) {
-    if ((strcmp((*it)->uniqueId, id) == 0)) {
-      return *it;
-    }
-  }
-  return &NO_RTL_433_DEVICE_FOUND;
-}
-
-void dumpRTL_433Devices() {
-  for (std::vector<RTL_433device*>::iterator it = RTL_433devices.begin(); it != RTL_433devices.end(); ++it) {
-    RTL_433device* p = *it;
-    DISCOVERY_TRACE_LOG(F("uniqueId %s" CR), p->uniqueId);
-    DISCOVERY_TRACE_LOG(F("modelName %s" CR), p->modelName);
-    DISCOVERY_TRACE_LOG(F("type %s" CR), p->type);
-    DISCOVERY_TRACE_LOG(F("isDisc %d" CR), p->isDisc);
-  }
+void logRTL_433DiscoveryDrop(const char* reason, const char* id) {
+  const uint32_t now = millis();
+  if (hasRTL_433DiscoveryWarning && now - lastRTL_433DiscoveryWarning < 60000UL) return;
+  hasRTL_433DiscoveryWarning = true;
+  lastRTL_433DiscoveryWarning = now;
+  Log.warning(F("[rtl_433] discovery ignored reason=%s id=%s total=%u" CR),
+              reason, id ? id : "", droppedRTL_433Devices);
 }
 
 void createOrUpdateDeviceRTL_433(const char* id, const char* model, const char* type, uint8_t flags) {
-  if (xSemaphoreTake(semaphorecreateOrUpdateDeviceRTL_433, pdMS_TO_TICKS(30000)) == pdFALSE) {
+  if (!semaphorecreateOrUpdateDeviceRTL_433) {
+    ++droppedRTL_433Devices;
+    return;
+  }
+  if (!id || !id[0] || !model || !type || strlen(id) >= uniqueIdSize ||
+      strlen(model) >= modelNameSize || strlen(type) >= typeSize) {
+    ++droppedRTL_433Devices;
+    logRTL_433DiscoveryDrop("invalid_or_too_long", id);
+    return;
+  }
+  if (xSemaphoreTake(semaphorecreateOrUpdateDeviceRTL_433, pdMS_TO_TICKS(QueueSemaphoreTimeOutTask)) == pdFALSE) {
     Log.error(F("[rtl_433] semaphorecreateOrUpdateDeviceRTL_433 Semaphore NOT taken" CR));
+    ++droppedRTL_433Devices;
     return;
   }
 
-  RTL_433device* device = getDeviceById(id);
-  if (device == &NO_RTL_433_DEVICE_FOUND) {
+  RTL_433device updated = {};
+  strlcpy(updated.uniqueId, id, sizeof(updated.uniqueId));
+  strlcpy(updated.modelName, model, sizeof(updated.modelName));
+  strlcpy(updated.type, type, sizeof(updated.type));
+  updated.isDisc = flags & device_flags_isDisc;
+  const auto result = RTL_433devices.upsert(updated, millis());
+  if (result == decltype(RTL_433devices)::Result::Inserted ||
+      result == decltype(RTL_433devices)::Result::Evicted) {
+    ++newRTL_433Devices;
+    if (result == decltype(RTL_433devices)::Result::Evicted)
+      ++evictedRTL_433Devices;
     DISCOVERY_TRACE_LOG(F("add %s" CR), id);
-    //new device
-    device = new RTL_433device();
-    if (strlcpy(device->uniqueId, id, uniqueIdSize) > uniqueIdSize) {
-      Log.warning(F("[rtl_433] Device id %s exceeds available space" CR), id); // Remove from production release ?
-    };
-    if (strlcpy(device->modelName, model, modelNameSize) > modelNameSize) {
-      Log.warning(F("[rtl_433] Device model %s exceeds available space" CR), model); // Remove from production release ?
-    };
-    if (strlcpy(device->type, type, typeSize) > typeSize) {
-      Log.warning(F("[rtl_433] Device type %s exceeds available space" CR), type); // Remove from production release ?
-    }
-    DISCOVERY_TRACE_LOG(F("[rtl_433] Device type is %s." CR), device->type); // Remove from production release ?
-    device->isDisc = flags & device_flags_isDisc;
-    RTL_433devices.push_back(device);
-    newRTL_433Devices++;
+  } else if (result == decltype(RTL_433devices)::Result::Full ||
+             result == decltype(RTL_433devices)::Result::Invalid) {
+    ++droppedRTL_433Devices;
+    logRTL_433DiscoveryDrop("cache_full", id);
   } else {
     DISCOVERY_TRACE_LOG(F("update %s" CR), id);
-
-    if (flags & device_flags_isDisc) {
-      device->isDisc = true;
-    }
   }
 
   xSemaphoreGive(semaphorecreateOrUpdateDeviceRTL_433);
 }
+
+unsigned int getRTLDiscoveryCacheCount() { return RTL_433devices.size(); }
+unsigned int getRTLDiscoveryCacheDropped() { return droppedRTL_433Devices; }
+unsigned int getRTLDiscoveryCacheEvicted() { return evictedRTL_433Devices; }
 
 // This function always should be called from the main core as it generates direct mqtt messages
 // When overrideDiscovery=true, we publish discovery messages of known RTL_433devices (even if no new)
 void launchRTL_433Discovery(bool overrideDiscovery) {
-  if (!overrideDiscovery && newRTL_433Devices == 0)
-    return;
+  if (!semaphorecreateOrUpdateDeviceRTL_433) return;
   if (xSemaphoreTake(semaphorecreateOrUpdateDeviceRTL_433, pdMS_TO_TICKS(QueueSemaphoreTimeOutLoop)) == pdFALSE) {
     Log.error(F("[rtl_433] semaphorecreateOrUpdateDeviceRTL_433 Semaphore NOT taken" CR));
     return;
   }
+  const bool shouldLaunch = overrideDiscovery || newRTL_433Devices > 0;
   newRTL_433Devices = 0;
-  std::vector<RTL_433device*> localDevices = RTL_433devices;
   xSemaphoreGive(semaphorecreateOrUpdateDeviceRTL_433);
-  for (std::vector<RTL_433device*>::iterator it = localDevices.begin(); it != localDevices.end(); ++it) {
-    RTL_433device* pdevice = *it;
+  if (!shouldLaunch) return;
+
+  // Copy one fixed-size record at a time. The previous vector copy allocated
+  // from the heap whenever discovery ran and could throw std::bad_alloc.
+  for (size_t slot = 0; slot < RTL_433devices.capacity(); ++slot) {
+    RTL_433device localDevice = {};
+    if (xSemaphoreTake(semaphorecreateOrUpdateDeviceRTL_433, pdMS_TO_TICKS(QueueSemaphoreTimeOutLoop)) == pdFALSE) {
+      Log.error(F("[rtl_433] discovery snapshot semaphore timeout" CR));
+      return;
+    }
+    const bool slotUsed = RTL_433devices.snapshot(slot, localDevice);
+    xSemaphoreGive(semaphorecreateOrUpdateDeviceRTL_433);
+    if (!slotUsed) continue;
+    RTL_433device* pdevice = &localDevice;
     DISCOVERY_TRACE_LOG(F("Device id %s" CR), pdevice->uniqueId);
     // Do not launch discovery for the RTL_433devices already discovered (unless we have overrideDiscovery) or that are not unique by their MAC Address (Ibeacon, GAEN and Microsoft Cdp)
     if (overrideDiscovery || !isDiscovered(pdevice)) {
       size_t numRows = sizeof(parameters) / sizeof(parameters[0]);
       for (int i = 0; i < numRows; i++) {
-        char deviceKeyParameter[25];
-        memcpy(deviceKeyParameter, &pdevice->uniqueId[strlen(pdevice->uniqueId) - strlen(parameters[i][0])], strlen(parameters[i][0]));
-        deviceKeyParameter[strlen(parameters[i][0])] = '\0';
-        Log.trace(F("deviceKeyParameter: %s" CR), deviceKeyParameter);
-
-        if (strcmp(deviceKeyParameter, parameters[i][0]) == 0) {
+        const char* parameter = parameters[i][0];
+        const size_t idLength = strlen(pdevice->uniqueId);
+        const size_t parameterLength = strlen(parameter);
+        // Require "-key" as an exact suffix. The former subtraction could
+        // underflow and read before uniqueId when an RF field was malformed.
+        if (idLength > parameterLength &&
+            pdevice->uniqueId[idLength - parameterLength - 1] == '-' &&
+            strcmp(pdevice->uniqueId + idLength - parameterLength, parameter) == 0) {
           // Remove the key from the unique id to extract the device id
           String idWoKey = pdevice->uniqueId;
           idWoKey.remove(idWoKey.length() - (strlen(parameters[i][0]) + 1));
@@ -234,8 +245,13 @@ void launchRTL_433Discovery(bool overrideDiscovery) {
                             stateClassMeasurement //State Class
             );
           }
-          pdevice->isDisc = true; // we don't need the semaphore and all the search magic via createOrUpdateDevice
-          dumpRTL_433Devices();
+          pdevice->isDisc = true;
+          if (xSemaphoreTake(semaphorecreateOrUpdateDeviceRTL_433, pdMS_TO_TICKS(QueueSemaphoreTimeOutLoop)) == pdTRUE) {
+            RTL_433devices.markDiscovered(pdevice->uniqueId);
+            xSemaphoreGive(semaphorecreateOrUpdateDeviceRTL_433);
+          } else {
+            Log.error(F("[rtl_433] discovery completion semaphore timeout" CR));
+          }
           break;
         }
       }
@@ -319,8 +335,9 @@ void rtl_433_Callback(char* message) {
 void setupRTL_433() {
   rtl_433.setCallback(rtl_433_Callback, messageBuffer, JSON_MSG_BUFFER);
 #  ifdef ZmqttDiscovery
-  semaphorecreateOrUpdateDeviceRTL_433 = xSemaphoreCreateBinary();
-  xSemaphoreGive(semaphorecreateOrUpdateDeviceRTL_433);
+  semaphorecreateOrUpdateDeviceRTL_433 = xSemaphoreCreateMutexStatic(&semaphorecreateOrUpdateDeviceRTL_433Buffer);
+  if (!semaphorecreateOrUpdateDeviceRTL_433)
+    Log.error(F("[rtl_433] discovery cache mutex unavailable; discovery disabled" CR));
 #  endif
   Log.trace(F("ZgatewayRTL_433 command topic: %s%s%s" CR), mqtt_topic, gateway_name, subjectMQTTtoRFset);
   Log.notice(F("ZgatewayRTL_433 setup done " CR));

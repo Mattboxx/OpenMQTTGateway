@@ -43,6 +43,19 @@ struct BLETrackerConfig_s {
   int lastRawRssi;
 };
 
+struct BLETrackerRuntimeSnapshot_s {
+  bool started;
+  bool starting;
+  bool blocked;
+  bool scanning;
+  bool pausedWeb;
+  bool pausedWiFi;
+  uint32_t advertisements;
+  uint32_t matched;
+  uint32_t dropped;
+  uint32_t pending;
+};
+
 extern BLETrackerConfig_s BLETrackerConfig[BLE_TRACKER_MAX];
 extern void launchBTDiscovery(bool overrideDiscovery);
 extern bool configureBLETracker(uint8_t slot, bool enabled, const char* mac, const char* name,
@@ -61,5 +74,6 @@ extern bool pauseBLETrackerScanForWeb();
 extern void resumeBLETrackerScanAfterWeb();
 extern void setBLETrackerWiFiAvailable(bool available);
 extern String stateBLETrackerMeasures();
+extern BLETrackerRuntimeSnapshot_s getBLETrackerRuntimeSnapshot();
 
 #endif
