@@ -265,6 +265,39 @@ retries later instead of discarding discovery or state data.
 
 ## Validation status
 
+### Reliability revision 6 (October 2026)
+
+Revision 6 is the current public release. BLE and NO BLE keep the same WOL,
+two-input/two-output, WebUI and Home Assistant features; only BLE tracking
+differs. All three presets compiled, including the unchanged upstream
+multi_receiver preset. Both custom variants were installed and returned to BLE
+through the existing local-file WebUI, without USB or changed sensor settings.
+All applicable web pages/fragments were complete, MQTT was connected and
+RTL_433 was active. The BLE controller resumed scanning afterward.
+
+The RF setup-only template table is released after independent decoder
+registration, recovering 17,584 bytes for the 157-entry OOK inventory without
+removing protocols. Unused demodulator metadata was also compacted; actual pulse
+arrays remain full size. RF copies check allocation and preserve 12,000 bytes
+of usable network headroom. A static network-timer reserve addresses a decoded
+lwIP allocation panic; WebUI writes and OTA have bounded memory/time behavior.
+The pinned multipart parser now checks binary boundaries without reading past
+the buffer, and the WOL MAC parser and one-attempt rollover cases are fixed.
+Routine BLE messages are verbose-only, while actionable errors remain visible.
+
+Fourteen native reliability programs, eight RF patch-generation checks, four
+WebServer generation checks, and actual RF allocation/ownership, BLE, WOL and
+GPIO/discovery function tests passed. Both complete eleven-file USB installers
+passed the pre-serial integrity checks. Host tests mock hardware and do not
+prove electrical behavior, every RF protocol or FreeRTOS interrupt scheduling.
+The owner requested publication without a scheduled multi-day observation;
+no scheduled monitoring remains. Initial BLE observations showed approximately
+41 KB of usable memory, zero allocation failures and zero Wi-Fi disconnects.
+Multi-week operation is not validated, historical outages may have had more
+than one cause, and this is not a guarantee of zero bugs or impossible hangs.
+See the [investigation record](../releases/reliability-r6-investigation.md) and
+the per-variant GitHub release notes for exact test scope and installation.
+
 ### Reliability revision 5 (September 2026)
 
 **Validation in progress — not a stable release.** All three target builds and
@@ -298,8 +331,9 @@ A saved crash decoded against its exact original ELF confirmed an uncaught
 `std::bad_alloc` while `stateMeasures()` serialized a system MQTT message into
 the outgoing queue. The queue now uses fixed slots and one checked payload
 allocation: exhaustion, a full queue or failed serialization reject the message
-and increment `msgblck` instead of throwing. The custom presets now preserve
+and increment `msgblck` instead of throwing. Those early candidates preserved
 24,000 bytes of heap on queue admission (the generic default remains 8 KiB).
+The current R6 presets use 12,000 bytes after the RF memory improvements.
 This is a precaution, not a guarantee that other allocations succeed.
 The cause of the preceding memory pressure has not yet been established.
 The saved panic occurred after the initial outage and does not prove that the

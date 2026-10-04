@@ -1,6 +1,7 @@
 # Reliability investigation — r6 candidates
 
-This is an investigation record, not a stable-release announcement.
+This is an investigation record. The R6 release notes describe the public
+release; candidate measurements below retain their original test scope.
 
 ## Evidence collected on 1 October 2026
 
@@ -1006,3 +1007,26 @@ dependency, WOL, GPIO and BLE-function regressions passed again. The round-trip
 tests establish wireless installation and settings preservation for both
 variants, not multi-day operation of either variant. The BLE firmware was left
 installed for observation; no physical output commands were sent.
+
+## Public R6 release (4 October 2026)
+
+The owner explicitly requested publication without waiting for scheduled
+multi-day observation. The hourly follow-up was deleted, not merely paused;
+long-term behavior will be reported during normal use. No claim of zero bugs
+or impossible hangs is made. Further improvements are separate from this
+published reference.
+
+Release source changes from test23 affect the two version labels only; the
+packager labels public builds correctly and README/release notes describe
+features, USB-first installation and evidence limitations. Final BLE and
+no-BLE builds passed in 98.388 and 100.330 seconds. The exact ELF and all
+bootloader/partition/application artifacts are archived privately. Public
+USB ZIPs contain all eleven required files, including four images, portable
+flashing utility and both launchers. Both passed the actual installer's
+pre-serial intact/corrupt/duplicate-manifest tests.
+
+BLE application: 1,834,816 bytes, SHA256
+`3E9A804248E2DBF077B181AD21B9CA89DF5AB30B11FA9D91F0E98F23E083C780`.
+NO BLE application: 1,690,544 bytes, SHA256
+`BB9B49F034275810C245ACDC7B465417E1B9F0391395A700709385834475D5CF`.
+Per-variant public manifests cover the WebUI application and complete USB ZIP.

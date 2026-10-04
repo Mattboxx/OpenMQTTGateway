@@ -52,19 +52,23 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
-* [Firmware with BLE — reliability update, pre-release](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble-r5)
-* [Firmware without BLE — reliability update, pre-release](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble-r5)
+* [Firmware with BLE — reliability update R6](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble-r6)
+* [Firmware without BLE — reliability update R6](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble-r6)
 
 ## Firmware variants
 
-**The September reliability update is a pre-release, not a confirmed stable
-release.** A later BLE outage is still unexplained; see the validation notes
-below. The previous published releases remain available while testing continues.
+**Reliability revision 6 is the current public release.** It fixes the decoded
+network-timer allocation panic, removes unused RF startup memory, adds checked
+RF allocation paths and hardens multipart parsing and OTA transfers. It retains
+the checked MQTT queue, recovery guards, persistent incident diagnostics and
+downloadable crash report from earlier revisions, with WOL parser/rollover fixes.
 
-Reliability revision 5 adds checked MQTT queue allocations, recovery from a stalled main loop, persistent
-incident diagnostics and a downloadable crash report. It also fixes console
-buffer concurrency, BLE pause recovery and long-running timers. See the
-[diagnostics and validation notes](docs/use/mqtt-wol.md#reliability-revision-5-september-2026).
+Both variants were built and installed on the same ESP32 through local-file
+WebUI OTA, with complete pages, MQTT/RF operation and unchanged GPIO/BLE settings.
+Native tests cover allocation failure, parser bounds, timers, GPIO/discovery,
+WOL and BLE presence behavior. Multi-week stability is not established, and no
+release promises zero bugs. See the
+[R6 diagnostics and validation notes](docs/use/mqtt-wol.md#reliability-revision-6-october-2026).
 
 | Variant | Intended use |
 | --- | --- |

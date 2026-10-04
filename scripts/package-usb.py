@@ -49,12 +49,14 @@ def package(artifacts, esptool, boot_app, output, variant, version):
     for name, source in sources.items():
         shutil.copyfile(source, output / name)
     label = (ROOT / "usb-flash" / ("VARIANTE-" + variant + ".txt")).read_text(encoding="utf-8").strip()
+    release_label = ("Candidata di test.\n" if "-test" in version
+                     else "Rilascio pubblico; test e limiti sono descritti su GitHub.\n")
     (output / "VARIANTE.txt").write_text(
         label + "\nVersione: " + version + "\n"
         "Scheda: ESP32 Dev Module, flash 4 MB, CC1101.\n"
         "Due GPIO input e due output; WOL configurabile.\n"
         "Le due varianti differiscono soltanto per il rilevatore BLE.\n"
-        "Questa e' una candidata di test, non una promessa di assenza di bug.\n"
+        + release_label + "Nessuna garanzia di assenza assoluta di bug.\n"
         "Per aggiornare via web usare solo firmware.bin, non lo ZIP.\n"
         "Per USB estrarre tutti i file e leggere LEGGIMI-PRIMA.md.\n",
         encoding="utf-8")
