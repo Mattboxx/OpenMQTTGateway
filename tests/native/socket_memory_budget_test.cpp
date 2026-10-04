@@ -5,9 +5,12 @@
 #include <string>
 
 int main() {
-  assert(socketWriteHasHeadroom(6656, 3076, 512));
-  assert(!socketWriteHasHeadroom(6655, 3076, 512));
-  assert(!socketWriteHasHeadroom(6656, 3075, 512));
+  assert(socketWriteHasHeadroom(socketReceiveReserve + 512, socketReceiveBlock + 512, 512));
+  assert(!socketWriteHasHeadroom(socketReceiveReserve + 511, socketReceiveBlock + 512, 512));
+  assert(!socketWriteHasHeadroom(socketReceiveReserve + 512, socketReceiveBlock + 511, 512));
+  assert(!socketWriteHasHeadroom(6656, 3076, 512));
+  // Sufficient aggregate RX space does not require two frames in one block.
+  assert(socketWriteHasHeadroom(10492, 4096, 512));
   assert(!socketWriteHasHeadroom(0, 0, 512));
   assert(!socketWriteHasHeadroom(5000, 20000, 1));
   assert(!socketWriteHasHeadroom(20000, 2308, 1));
@@ -15,7 +18,7 @@ int main() {
 
   const std::string payload(5000, 'x');
   std::string output;
-  size_t freeBytes = 8000, inFlight = 0;
+  size_t freeBytes = socketReceiveReserve + 1024, inFlight = 0;
   uint32_t now = 0xfffffff0U;
   unsigned waits = 0;
   const size_t sent = writeBoundedResponse(payload.data(), payload.size(),
@@ -26,7 +29,7 @@ int main() {
       }
       freeBytes -= count;
       inFlight += count;
-      assert(freeBytes >= 6144);
+      assert(freeBytes >= socketReceiveReserve);
       output.append(bytes, count);
       return static_cast<int>(count);
     }, [&]() { return now; }, [&](unsigned ms) {

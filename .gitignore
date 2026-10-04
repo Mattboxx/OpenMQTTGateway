@@ -5,6 +5,7 @@
 **/.DS_Store
 node_modules
 *.ps1
+!tests/native/usb_package_integrity_test.ps1
 !recovery/**/flash-recovery.ps1
 artifacts/*.bin
 !artifacts/OpenMQTTGateway-v1.8.1-wol-gpio.38.bin

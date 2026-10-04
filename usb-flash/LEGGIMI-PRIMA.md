@@ -14,6 +14,11 @@ PlatformIO, Python o altri programmi.
 5. Se viene mostrata piu' di una porta COM, scegliere quella apparsa collegando
    la ESP32. Confermare con INVIO e attendere il messaggio verde finale.
 
+Prima di usare la porta USB, lo script controlla automaticamente gli SHA256 di
+tutti i file del pacchetto. Se un file manca, e' danneggiato o proviene da un
+altro ZIP, si ferma senza scrivere la scheda: scaricare ed estrarre nuovamente
+l'intero pacchetto. Il controllo non sostituisce una fonte di download fidata.
+
 Lo script scrive automaticamente questi file agli indirizzi corretti:
 
 | Indirizzo | File |
@@ -26,6 +31,12 @@ Lo script scrive automaticamente questi file agli indirizzi corretti:
 Non viene eseguita la cancellazione completa della flash, quindi normalmente
 le impostazioni Wi-Fi, MQTT, GPIO, WOL e BLE gia' salvate rimangono presenti.
 Il controllo MD5 eseguito da esptool verifica automaticamente ogni scrittura.
+La procedura standard usa la scrittura compressa a 115200 baud. Se si interrompe,
+non scollegare la scheda: chiudere la finestra e provare `RIPROVA-USB-ROM.bat`.
+Il metodo alternativo usa il bootloader ROM senza caricare il flasher in RAM.
+Entrambi i metodi sono stati usati sulla scheda di prova, ma nessuno puo'
+compensare un cavo, un'alimentazione o una connessione USB difettosi.
+Non scollegare la scheda mentre la scrittura e' in corso.
 
 ## Se la scheda non entra in modalita' flash
 

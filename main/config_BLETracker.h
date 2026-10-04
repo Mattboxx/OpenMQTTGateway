@@ -68,7 +68,7 @@ extern String getBLETrackerCandidatesHtml();
 
 extern void setupBLETracker();
 extern void loopBLETracker();
-extern void stopBLETracker(bool deinitRadio);
+extern bool stopBLETracker(bool deinitRadio);
 extern bool isBLETrackerStarting();
 extern bool pauseBLETrackerScanForWeb();
 extern void resumeBLETrackerScanAfterWeb();

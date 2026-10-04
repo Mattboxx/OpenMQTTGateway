@@ -12,6 +12,7 @@
 #include <Update.h>
 #include <esp_core_dump.h>
 #include <esp_system.h>
+#include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 #include <esp_debug_helpers.h>
 #include <esp_private/system_internal.h>
@@ -38,6 +39,22 @@ struct Record {
 RTC_NOINIT_ATTR Record pendingRecord;
 Record lastRecord = {};
 Record lastWifiRecord = {};
+constexpr uint32_t otaRecordMagic = 0x4F544131;
+struct OTARecord {
+  uint32_t magic;
+  uint32_t uptimeMs;
+  uint32_t expected;
+  uint32_t accepted;
+  int32_t error;
+  int32_t detail;
+  uint8_t transport;
+  uint8_t stage;
+  uint8_t lastStage;
+  uint8_t reserved;
+  char version[48];
+};
+RTC_NOINIT_ATTR OTARecord pendingOTARecord;
+OTARecord lastOTARecord = {};
 portMUX_TYPE progressMux = portMUX_INITIALIZER_UNLOCKED;
 RuntimeHeartbeat heartbeat;
 uint32_t disconnects;
@@ -215,6 +232,53 @@ void runtimeRememberWiFiFailure() {
   saveRecord("wifi", lastWifiRecord);
 }
 
+void runtimeOTAStart(OTATransport transport, uint32_t expected) {
+  OTARecord record = {};
+  record.magic = otaRecordMagic;
+  record.uptimeMs = millis();
+  record.expected = expected;
+  record.transport = static_cast<uint8_t>(transport);
+  record.stage = static_cast<uint8_t>(OTAStage::Starting);
+  strlcpy(record.version, OMG_VERSION, sizeof(record.version));
+  portENTER_CRITICAL(&progressMux);
+  pendingOTARecord = record;
+  portEXIT_CRITICAL(&progressMux);
+}
+
+void runtimeOTAStep(OTAStage stage) {
+  portENTER_CRITICAL(&progressMux);
+  if (pendingOTARecord.magic == otaRecordMagic) {
+    pendingOTARecord.lastStage = pendingOTARecord.stage;
+    pendingOTARecord.stage = static_cast<uint8_t>(stage);
+    pendingOTARecord.uptimeMs = millis();
+  }
+  portEXIT_CRITICAL(&progressMux);
+}
+
+void runtimeOTAAccepted(uint32_t total, uint32_t expected) {
+  portENTER_CRITICAL(&progressMux);
+  if (pendingOTARecord.magic == otaRecordMagic) {
+    pendingOTARecord.accepted = total;
+    if (expected) pendingOTARecord.expected = expected;
+    pendingOTARecord.uptimeMs = millis();
+  }
+  portEXIT_CRITICAL(&progressMux);
+}
+
+void runtimeOTAFinish(bool success, int error, int detail) {
+  portENTER_CRITICAL(&progressMux);
+  if (pendingOTARecord.magic == otaRecordMagic) {
+    if (pendingOTARecord.stage != static_cast<uint8_t>(OTAStage::Complete) &&
+        pendingOTARecord.stage != static_cast<uint8_t>(OTAStage::Failed))
+      pendingOTARecord.lastStage = pendingOTARecord.stage;
+    pendingOTARecord.stage = static_cast<uint8_t>(success ? OTAStage::Complete : OTAStage::Failed);
+    pendingOTARecord.error = error;
+    if (detail) pendingOTARecord.detail = detail;
+    pendingOTARecord.uptimeMs = millis();
+  }
+  portEXIT_CRITICAL(&progressMux);
+}
+
 void runtimeDiagnosticsBegin() {
   heap_caps_register_failed_alloc_callback(allocationFailed);
   const esp_reset_reason_t bootResetReason = esp_reset_reason();
@@ -224,6 +288,17 @@ void runtimeDiagnosticsBegin() {
       preferences.getBytes("last", &lastRecord, sizeof(lastRecord));
     if (preferences.getBytesLength("wifi") == sizeof(lastWifiRecord))
       preferences.getBytes("wifi", &lastWifiRecord, sizeof(lastWifiRecord));
+    if (preferences.getBytesLength("ota") == sizeof(lastOTARecord))
+      preferences.getBytes("ota", &lastOTARecord, sizeof(lastOTARecord));
+    if (bootResetReason != ESP_RST_POWERON && pendingOTARecord.magic == otaRecordMagic) {
+      lastOTARecord = pendingOTARecord;
+      if (lastOTARecord.stage != static_cast<uint8_t>(OTAStage::Complete) &&
+          lastOTARecord.stage != static_cast<uint8_t>(OTAStage::Failed)) {
+        lastOTARecord.lastStage = lastOTARecord.stage;
+        lastOTARecord.stage = static_cast<uint8_t>(OTAStage::Interrupted);
+      }
+      preferences.putBytes("ota", &lastOTARecord, sizeof(lastOTARecord));
+    }
     // Revision 5 used the severe-incident slot for Wi-Fi recovery records.
     // Migrate it once so future network outages cannot erase evidence from a
     // stalled loop or hardware watchdog reset.
@@ -239,6 +314,8 @@ void runtimeDiagnosticsBegin() {
   }
   lastRecord.version[sizeof(lastRecord.version) - 1] = '\0';
   lastWifiRecord.version[sizeof(lastWifiRecord.version) - 1] = '\0';
+  lastOTARecord.version[sizeof(lastOTARecord.version) - 1] = '\0';
+  pendingOTARecord.magic = 0;
   if (bootResetReason != ESP_RST_POWERON && pendingRecord.magic == recordMagic) {
     lastRecord = pendingRecord;
     saveRecord("last", lastRecord);
@@ -266,9 +343,14 @@ void runtimeDiagnosticsBegin() {
 }
 
 String runtimeDiagnosticsJSON() {
-  StaticJsonDocument<2048> json;
+  StaticJsonDocument<2304> json;
   const Record current = snapshot(0);
   json["version"] = OMG_VERSION;
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running) {
+    json["running_partition"] = running->label;
+    json["running_address"] = running->address;
+  }
   json["uptime_ms"] = current.uptimeMs;
   json["reset_reason"] = static_cast<unsigned>(esp_reset_reason());
   json["runtime_guard"] = guardStarted;
@@ -391,6 +473,20 @@ String runtimeDiagnosticsJSON() {
     json["last_wifi_failure"] = nullptr;
   }
   String output;
+  if (lastOTARecord.magic == otaRecordMagic) {
+    JsonObject ota = json.createNestedObject("last_ota");
+    ota["version"] = lastOTARecord.version;
+    ota["transport"] = lastOTARecord.transport == 1 ? "web_file" : lastOTARecord.transport == 2 ? "url" : "network";
+    ota["stage"] = lastOTARecord.stage;
+    ota["last_stage"] = lastOTARecord.lastStage;
+    ota["accepted_bytes"] = lastOTARecord.accepted;
+    ota["expected_bytes"] = lastOTARecord.expected;
+    ota["error"] = lastOTARecord.error;
+    ota["detail"] = lastOTARecord.detail;
+    ota["uptime_ms"] = lastOTARecord.uptimeMs;
+  } else {
+    json["last_ota"] = nullptr;
+  }
   serializeJson(json, output);
   return output;
 }

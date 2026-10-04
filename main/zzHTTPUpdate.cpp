@@ -27,6 +27,7 @@
 
 #  include <StreamString.h>
 #  include "BoundedFirmwareTransfer.h"
+#  include "RuntimeDiagnostics.h"
 #  include <esp_ota_ops.h> // get running partition
 #  include <esp_partition.h>
 
@@ -400,13 +401,20 @@ bool HTTPUpdate::runUpdate(WiFiClient& in, uint32_t size, String md5, int comman
   // To do: the SHA256 could be checked if the server sends it
 
   size_t written = 0;
+  runtimeOTAAccepted(0, size);
   const FirmwareTransferResult transfer = transferFirmware(size, written,
       [&]() { return in.available(); }, [&]() { return in.connected(); },
-      [&](uint8_t* block, size_t count) { return in.read(block, count); },
-      [&](uint8_t* block, size_t count) { return Update.write(block, count); },
+      [&](uint8_t* block, size_t count) { runtimeOTAStep(OTAStage::Receiving); return in.read(block, count); },
+      [&](uint8_t* block, size_t count) {
+        runtimeOTAStep(OTAStage::Writing);
+        const size_t accepted = Update.write(block, count);
+        runtimeOTAAccepted(written + accepted, size);
+        return accepted;
+      },
       []() { return millis(); }, [](unsigned ms) { delay(ms); });
   if (transfer != FirmwareTransferResult::Complete) {
     _lastError = Update.getError() ? Update.getError() : HTTP_UE_TRANSFER_FAILED;
+    runtimeOTAFinish(false, _lastError, static_cast<int>(transfer));
     Update.printError(error);
     error.trim(); // remove line ending
     log_e("Firmware transfer failed result=%u bytes=%u/%u (%s)\n",
@@ -415,6 +423,7 @@ bool HTTPUpdate::runUpdate(WiFiClient& in, uint32_t size, String md5, int comman
     return false;
   }
 
+  runtimeOTAStep(OTAStage::Validating);
   if (!Update.end()) {
     _lastError = Update.getError() ? Update.getError() : HTTP_UE_TRANSFER_FAILED;
     Update.printError(error);

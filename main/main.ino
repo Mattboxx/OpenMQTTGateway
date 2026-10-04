@@ -29,6 +29,9 @@
 #include "RuntimeDiagnostics.h"
 #include "NetworkLiveness.h"
 #include "CheckedMessageQueue.h"
+#if defined(ESP32) && defined(OMG_RUNTIME_DIAGNOSTICS)
+#  include <esp_private/system_internal.h>
+#endif
 #if defined(ESP32) && defined(OMG_WIFI_MEMORY_BUDGET)
 #  include <esp_heap_caps.h>
 #endif
@@ -97,6 +100,7 @@ int maxQueueLength = 0;
 bool ready_to_sleep = false;
 
 #include <ArduinoJson.h>
+#include "BoundedJsonArray.h"
 #include <ArduinoLog.h>
 #include <PicoMQTT.h>
 #ifdef MQTT_WOL_ENABLED
@@ -115,6 +119,9 @@ struct JsonBundle {
 };
 
 CheckedMessageQueue<QueueSize> jsonQueue;
+// Protected by xQueueMutex on ESP32. OTA cannot drain/publish this queue while
+// its blocking transport owns the loop; retaining it wastes RX working memory.
+bool otaQueuePaused = false;
 
 #ifdef ESP32
 #  include <driver/adc.h>
@@ -410,12 +417,16 @@ static void startupModuleWatchdogTask(void* parameter) {
   const bool setupCompleted = ulTaskNotifyTake(pdTRUE, timeoutTicks) > 0;
 
   if (!setupCompleted && startupModuleWatchdogArmed) {
-    Log.error(F("[BOOT] module initialization watchdog expired timeout_ms=%lu heap=%u min_heap=%u; restarting" CR),
-              (unsigned long)STARTUP_MODULE_WATCHDOG_MS, ESP.getFreeHeap(), ESP.getMinFreeHeap());
     omgRequestedRestartReasonRtc = 10;
     omgRestartRtcMagic = OMG_RESTART_RTC_MAGIC;
-    Serial.flush();
+#  ifdef OMG_RUNTIME_DIAGNOSTICS
+    // A stalled module may hold logger, allocator or radio shutdown locks.
+    // RTC reason 10 remains readable on the next boot; do not block recovery
+    // by logging, flushing serial, querying heap or running SDK handlers.
+    esp_restart_noos();
+#  else
     esp_restart();
+#  endif
   }
 
   startupModuleWatchdogHandle = nullptr;
@@ -628,7 +639,7 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
   const size_t queueHeap = ESP.getFreeHeap();
 #endif
   const bool headroom = queueHeap >= payloadBytes + QUEUE_MIN_FREE_HEAP;
-  const bool accepted = headroom && payloadBytes <= JSON_MSG_BUFFER_MAX &&
+  const bool accepted = !otaQueuePaused && headroom && payloadBytes <= JSON_MSG_BUFFER_MAX &&
                         jsonQueue.tryPush(payloadBytes, [&](char* data, size_t capacity) {
                           return serializeJson(jsonDoc, data, capacity) == payloadBytes;
                         });
@@ -648,6 +659,44 @@ boolean enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc, in
 bool enqueueJsonObject(const StaticJsonDocument<JSON_MSG_BUFFER>& jsonDoc) {
   return enqueueJsonObject(jsonDoc, QueueSemaphoreTimeOutLoop);
 }
+
+#ifdef ESP32
+bool prepareFirmwareUpdateMemory() {
+  ProcessLock = true;
+  if (xSemaphoreTake(xQueueMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    Log.error(F("[OTA] unable to pause message queue safely" CR));
+    return false;
+  }
+  otaQueuePaused = true;
+  const size_t discarded = jsonQueue.clear();
+  xSemaphoreGive(xQueueMutex);
+#  if defined(ZgatewayRTL_433) || defined(ZgatewayPilight) || defined(ZgatewayRF) || defined(ZgatewayRF2)
+  disableCurrentReceiver();
+#  endif
+#  if !MQTT_BROKER_MODE
+  if (mqtt) mqtt->disconnect();
+#  endif
+#  ifdef ZgatewayBT
+  stopProcessing(true);
+#  elif defined(ZgatewayBLETracker)
+  // Acknowledged, ordered SDK shutdown is needed to recover controller RAM.
+  // Scan-only pause left insufficient Wi-Fi RX memory in live test15 uploads.
+  if (!stopBLETracker(true)) return false;
+#  endif
+#  ifdef OMG_WIFI_MEMORY_BUDGET
+  constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT;
+  Log.notice(F("[OTA] transport memory prepared discarded_messages=%u usable=%u largest=%u heap=%u" CR),
+             (unsigned)discarded, heap_caps_get_free_size(caps),
+             heap_caps_get_largest_free_block(caps), ESP.getFreeHeap());
+#  else
+  Log.notice(F("[OTA] transport memory prepared discarded_messages=%u heap=%u" CR),
+             (unsigned)discarded, ESP.getFreeHeap());
+#  endif
+  // All callers restart after an attempted update, including errors. This
+  // temporary pause never modifies saved RF/BLE/MQTT or GPIO configuration.
+  return true;
+}
+#endif
 
 #ifdef ESP32
 #  include "mbedtls/sha256.h"
@@ -1158,6 +1207,7 @@ std::pair<String, uint16_t> discoverMQTTbroker() {
 static bool mqttWOLTrackingDisconnect = false;
 static unsigned long mqttWOLDisconnectedSince = 0;
 static unsigned long mqttWOLLastAttempt = 0;
+static bool mqttWOLAttempted = false;
 static bool mqttWOLWakeSent = false;
 
 static int mqttWOLHexValue(char value) {
@@ -1171,8 +1221,10 @@ static bool mqttWOLParseMAC(const char* text, byte* mac) {
   if (!text || !mac) return false;
   for (byte index = 0; index < 6; index++) {
     int high = mqttWOLHexValue(*text++);
+    // Reject the terminator/invalid first nibble before reading another byte.
+    if (high < 0) return false;
     int low = mqttWOLHexValue(*text++);
-    if (high < 0 || low < 0) return false;
+    if (low < 0) return false;
     mac[index] = (high << 4) | low;
     if (index < 5 && *text++ != ':') return false;
   }
@@ -1221,6 +1273,7 @@ static void mqttWOLConnected() {
   mqttWOLTrackingDisconnect = false;
   mqttWOLDisconnectedSince = 0;
   mqttWOLLastAttempt = 0;
+  mqttWOLAttempted = false;
   mqttWOLWakeSent = false;
 }
 
@@ -1271,12 +1324,14 @@ static void mqttWOLDisconnected(PicoMQTT::ConnectReturnCode returnCode) {
               now - mqttWOLDisconnectedSince, mqttWOLConfig.initialDelayMs);
     return;
   }
-  if (mqttWOLLastAttempt &&
+  // A separate flag keeps an attempt at millis()==0 valid after rollover.
+  if (mqttWOLAttempted &&
       (mqttWOLConfig.repeatIntervalMs == 0 ||
        (unsigned long)(now - mqttWOLLastAttempt) < mqttWOLConfig.repeatIntervalMs))
     return;
 
   mqttWOLLastAttempt = now;
+  mqttWOLAttempted = true;
   mqttWOLWakeSent = mqttWOLSend() || mqttWOLWakeSent;
 }
 #endif
@@ -2040,7 +2095,7 @@ void setup() {
   Log.trace(F("mqtt_max_payload_size: %d" CR), mqtt_max_payload_size);
   SYSConfig.offline ? Log.notice(F("Offline enabled" CR)) : Log.notice(F("Offline disabled" CR));
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeJsonArrayBounded(modules, jsonChar);
   Log.notice(F("OpenMQTTGateway modules: %s" CR), jsonChar);
 #if defined(ESP32) && defined(STARTUP_MODULE_WATCHDOG_MS) && STARTUP_MODULE_WATCHDOG_MS > 0
   disarmStartupModuleWatchdog();
@@ -2122,39 +2177,52 @@ void setOTA() {
 
   // No authentication by default
   ArduinoOTA.setPassword(ota_pass);
+#ifdef ESP32
+  // Allow bounded TCP retransmission/backpressure instead of abandoning an
+  // otherwise authenticated transfer after the SDK's one-second default.
+  ArduinoOTA.setTimeout(15000);
+#endif
 
   ArduinoOTA.onStart([]() {
+    runtimeOTAStart(OTATransport::Network);
     Log.trace(F("Start OTA, lock other functions" CR));
     last_ota_activity_millis = millis();
 #ifdef ESP32
-    ProcessLock = true;
-#  ifdef ZgatewayBT
-    stopProcessing(true);
-#  elif defined(ZgatewayBLETracker)
-    stopBLETracker(true);
-#  endif
+    if (!prepareFirmwareUpdateMemory()) {
+      runtimeOTAFinish(false, -201);
+      ESPRestart(6);
+      return;
+    }
 #endif
     lpDisplayPrint("OTA in progress");
   });
   ArduinoOTA.onEnd([]() {
+    runtimeOTAFinish(true);
     Log.trace(F("\nOTA done" CR));
     last_ota_activity_millis = 0;
     lpDisplayPrint("OTA done");
     ESPRestart(6);
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    runtimeOTAAccepted(progress, total);
     runtimeProgress(RuntimePhase::OTA);
     Log.trace(F("Progress: %u%%\r" CR), total ? (unsigned int)((uint64_t)progress * 100 / total) : 0U);
     gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
     last_ota_activity_millis = millis();
   });
   ArduinoOTA.onError([](ota_error_t error) {
+    // Authentication rejection occurs before onStart(): no radio was stopped
+    // and no update owns ProcessLock. A bad password must not reboot a working
+    // gateway or overwrite diagnostics for the previous real OTA attempt.
+    if (error == OTA_AUTH_ERROR) {
+      Log.error(F("[OTA] authentication rejected; gateway remains running" CR));
+      return;
+    }
+    runtimeOTAFinish(false, error);
     last_ota_activity_millis = millis();
     Serial.printf("Error[%u]: ", error);
     gatewayState = GatewayState::ERROR;
-    if (error == OTA_AUTH_ERROR)
-      Log.error(F("Auth Failed" CR));
-    else if (error == OTA_BEGIN_ERROR)
+    if (error == OTA_BEGIN_ERROR)
       Log.error(F("Begin Failed" CR));
     else if (error == OTA_CONNECT_ERROR)
       Log.error(F("Connect Failed" CR));
@@ -3736,7 +3804,7 @@ String stateMeasures() {
   if (!stateSnapshotOnly) enqueueJsonObject(SYSdata);
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, 99);
+  serializeJsonArrayBounded(modules, jsonChar);
 
   String _modules = jsonChar;
 
@@ -4083,14 +4151,12 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
         return;
       }
 #  ifdef ESP32
-      ProcessLock = true;
-#    ifdef ZgatewayBT
-      stopProcessing(true);
-#    elif defined(ZgatewayBLETracker)
-      // Match local-file OTA: release controller RAM before HTTP/TLS buffers
-      // and the flash-update buffer are allocated. Every result restarts below.
-      stopBLETracker(true);
-#    endif
+      runtimeOTAStart(OTATransport::URL);
+      if (!prepareFirmwareUpdateMemory()) {
+        runtimeOTAFinish(false, -201);
+        ESPRestart(6);
+        return;
+      }
 #  endif
       Log.warning(F("Starting firmware update with %d freeHeap" CR), ESP.getFreeHeap());
       gatewayState = GatewayState::REMOTE_OTA_IN_PROGRESS;
@@ -4158,6 +4224,7 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
       switch (result) {
         case HTTP_UPDATE_FAILED:
 #  ifdef ESP32
+          runtimeOTAFinish(false, httpUpdate.getLastError());
           Log.error(F("HTTP_UPDATE_FAILED Error (%d): %s\n" CR), httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
 #  elif ESP8266
           Log.error(F("HTTP_UPDATE_FAILED Error (%d): %s\n" CR), ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
@@ -4170,6 +4237,7 @@ void MQTTHttpsFWUpdate(const char* topicOri, JsonObject& HttpsFwUpdateData) {
           break;
 
         case HTTP_UPDATE_OK:
+          runtimeOTAFinish(true);
           Log.notice(F("HTTP_UPDATE_OK" CR));
           jsondata["release_summary"] = "Update success !";
           jsondata["installed_version"] = latestVersion;

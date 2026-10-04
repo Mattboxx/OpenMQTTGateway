@@ -46,8 +46,16 @@ int main() {
       assert(queue.frontSize() == 4);
       queue.pop();
     }
+    assert(push("clear first"));
+    assert(push("clear second"));
+    assert(queue.clear() == 2);
+    assert(queue.empty() && FaultAllocator::live == 0);
+    assert(queue.clear() == 0);
+    assert(push("reusable after clear"));
+    assert(strcmp(queue.front(), "reusable after clear") == 0);
+    queue.pop();
     assert(push("released by destructor"));
   }
   assert(FaultAllocator::live == 0);
-  puts("PASS: allocation failure, full queue, failed serialization, FIFO, wrap and ownership");
+  puts("PASS: allocation failure, full queue, failed serialization, FIFO, wrap, clear/reuse and ownership");
 }

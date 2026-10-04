@@ -10,6 +10,7 @@
 #ifdef ZgatewayBLETracker
 
 #  include <Preferences.h>
+#  include "ControllerShutdown.h"
 #  include <esp_bt.h>
 #  include <esp_coexist.h>
 #  include <esp_err.h>
@@ -696,28 +697,43 @@ void setupBLETracker() {
   }
 }
 
-void stopBLETracker(bool deinitRadio) {
+// Defined below; its bounded HCI command waits for the actual scan-stop ACK.
+static bool setBLETrackerScanEnabledForWeb(bool enabled);
+
+bool stopBLETracker(bool deinitRadio) {
   if (bleTrackerStarting) {
     // Deinitializing the controller concurrently with esp_bt_controller_init()
     // is unsafe. OTA entry points normally reject this short window; other
-    // callers recover with a clean reboot instead of racing ESP-IDF.
-    Log.error(F("[BLE][ADV] stop requested during controller initialization; restarting safely" CR));
-    delay(100);
-    ESP.restart();
-    return;
+    // callers must reject the OTA and recover instead of racing ESP-IDF.
+    Log.error(F("[BLE][OTA] stop rejected during controller initialization" CR));
+    return false;
   }
-  bleTrackerScanning = false;
-  bleTrackerWebPauseRequested = false;
-  if (deinitRadio && esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-    uint32_t before = ESP.getFreeHeap();
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-    esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+  bleTrackerWebPauseRequested = true;
+  if (!deinitRadio) return pauseControllerScan(bleTrackerScanning,
+      []() { return setBLETrackerScanEnabledForWeb(false); });
+  const uint32_t before = ESP.getFreeHeap();
+  const auto status = esp_bt_controller_get_status();
+  const ControllerState state = status == ESP_BT_CONTROLLER_STATUS_ENABLED ? ControllerState::Enabled :
+                                status == ESP_BT_CONTROLLER_STATUS_INITED ? ControllerState::Initialized : ControllerState::Idle;
+  int sdkError = 0;
+  const ControllerShutdownResult result = shutdownController(state, bleTrackerScanning,
+      bleTrackerHciState == BLE_HCI_READY || bleTrackerHciState == BLE_HCI_IDLE,
+      []() { return setBLETrackerScanEnabledForWeb(false); },
+      [&]() { return sdkError = esp_bt_controller_disable(); },
+      [&]() { return sdkError = esp_bt_controller_deinit(); },
+      [&]() { return sdkError = esp_bt_controller_mem_release(ESP_BT_MODE_BLE); });
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
     bleTrackerStarted = false;
+    bleTrackerScanning = false;
     bleTrackerHciState = BLE_HCI_IDLE;
-    Log.verbose(F("[BLE][ADV] controller stopped heap_before=%u heap_after=%u" CR), before, ESP.getFreeHeap());
   }
+  if (result != ControllerShutdownResult::Complete) {
+    Log.error(F("[BLE][OTA] controller shutdown failed step=%u sdk_error=%d" CR), static_cast<unsigned>(result), sdkError);
+    return false;
+  }
+  Log.verbose(F("[BLE][ADV] controller stopped heap_before=%u heap_after=%u" CR), before, ESP.getFreeHeap());
   bleTrackerInitGuard = 0;
+  return true;
 }
 
 bool isBLETrackerStarting() {

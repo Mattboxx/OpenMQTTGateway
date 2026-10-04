@@ -19,7 +19,7 @@ public:
   CheckedMessageQueue() = default;
   CheckedMessageQueue(const CheckedMessageQueue&) = delete;
   CheckedMessageQueue& operator=(const CheckedMessageQueue&) = delete;
-  ~CheckedMessageQueue() { while (!empty()) pop(); }
+  ~CheckedMessageQueue() { clear(); }
   size_t size() const { return count; }
   bool empty() const { return count == 0; }
   const char* front() const { return empty() ? "" : slots[head].data; }
@@ -42,5 +42,10 @@ public:
     slots[head] = {nullptr, 0};
     head = (head + 1) % Capacity;
     --count;
+  }
+  size_t clear() {
+    const size_t removed = count;
+    while (!empty()) pop();
+    return removed;
   }
 };

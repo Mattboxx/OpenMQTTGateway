@@ -38,6 +38,7 @@
 
 #  include "ArduinoLog.h"
 #  include "BoundedLogBuffer.h"
+#  include "BoundedJsonArray.h"
 #  include "BoundedSocketWrite.h"
 #  ifdef OMG_WIFI_MEMORY_BUDGET
 #    include "SocketMemoryBudget.h"
@@ -58,6 +59,14 @@
 
 uint32_t requestToken = 0;
 extern bool stateSnapshotOnly;
+extern bool prepareFirmwareUpdateMemory();
+
+template <size_t Capacity>
+void serializeWebModules(char (&target)[Capacity]) {
+  if (!serializeJsonArrayBounded(modules, target)) {
+    Log.warning(F("[WebUI] module list exceeds fixed buffer; using safe empty array" CR));
+  }
+}
 
 QueueHandle_t webUIQueue;
 
@@ -517,7 +526,7 @@ void handleRoot() {
     } else if (server.hasArg("rst")) { // TODO: This should redirect to the RST page
       Log.warning(F("[WebUI] Restart" CR));
       char jsonChar[100];
-      serializeJson(modules, jsonChar, measureJson(modules) + 1);
+      serializeWebModules(jsonChar);
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Restart").c_str());
@@ -540,7 +549,7 @@ void handleRoot() {
     }
   } else {
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
 
     char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -570,7 +579,7 @@ void handleCN() {
     }
   } else {
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
 
     char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -618,7 +627,7 @@ void handleWU() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1054,7 +1063,7 @@ void handleGI() {
 #  endif
 
       char jsonChar[100];
-      serializeJson(modules, jsonChar, measureJson(modules) + 1);
+      serializeWebModules(jsonChar);
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
       snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save GPIO").c_str());
       String response = String(buffer) + String(restart_script) + String(script) + String(style);
@@ -1071,7 +1080,7 @@ void handleGI() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure GPIO").c_str());
   String pageHeader = String(buffer);
@@ -1250,7 +1259,7 @@ void handleBTTrackers() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
   // These formatted fragments are below 768 bytes. Keeping the general 3 KB
   // WebUI buffer on this handler's stack leaves too little stack headroom.
   constexpr size_t BLE_WEB_FRAGMENT_BUFFER_SIZE = 768;
@@ -1369,7 +1378,7 @@ void handleWI() {
       WEBUI_TRACE_LOG(F("handleWI scan: results %s" CR), WiFiScan.c_str());
 
       char jsonChar[100];
-      serializeJson(modules, jsonChar, measureJson(modules) + 1);
+      serializeWebModules(jsonChar);
 
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1405,7 +1414,7 @@ void handleWI() {
         String topic = String(mqtt_topic) + String(gateway_name) + String(subjectMQTTtoSYSset);
         Log.warning(F("[WebUI] Save WiFi and Restart" CR));
         char jsonChar[100];
-        serializeJson(modules, jsonChar, measureJson(modules) + 1);
+        serializeWebModules(jsonChar);
         char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
         snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save WiFi and Restart").c_str());
@@ -1428,7 +1437,7 @@ void handleWI() {
     }
   }
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1588,7 +1597,7 @@ void handleMQ() {
           WEBtoSYS["save_cnt"] = true;
         }
         char jsonChar[100];
-        serializeJson(modules, jsonChar, measureJson(modules) + 1);
+        serializeWebModules(jsonChar);
         char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
         snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save configuration").c_str());
@@ -1618,7 +1627,7 @@ void handleMQ() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1711,7 +1720,7 @@ void handleCG() {
     Log.warning(F("[WebUI] Save Password and Restart" CR));
 
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
     char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
     snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Save Password and Restart").c_str());
@@ -1733,7 +1742,7 @@ void handleCG() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1769,7 +1778,7 @@ void handleLO() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -1880,7 +1889,7 @@ void handleLA() {
     }
   }
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure LORA").c_str());
@@ -2040,7 +2049,7 @@ void handleRF() {
   String activeReceiverHtml = generateActiveReceiverOptions(RFConfig.activeReceiver);
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Configure RF").c_str());
@@ -2070,7 +2079,7 @@ void handleRT() {
   }
   if (server.hasArg("non")) {
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
     Log.warning(F("[WebUI] Erase and Restart" CR));
 
     char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
@@ -2116,7 +2125,7 @@ void handleCL() {
   }
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -2166,7 +2175,7 @@ void handleTK() {
     if (setCloudDeviceToken(deviceToken) && server.arg("RT").toInt() == requestToken && server.arg("uptime").toInt() + 600 > uptime()) {
       setCloudEnabled(true);
       char jsonChar[100];
-      serializeJson(modules, jsonChar, measureJson(modules) + 1);
+      serializeWebModules(jsonChar);
 
       char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -2203,7 +2212,7 @@ void handleIN() {
     }
   } else {
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
 
     stateSnapshotOnly = true;
     String informationDisplay = stateMeasures(); // .replace(",\"", "}1");  // .replace("\":", "=2")
@@ -2308,6 +2317,7 @@ String localFirmwareUploadError;
 
 void setLocalFirmwareUploadError(const String& error) {
   if (!localFirmwareUploadError.length()) localFirmwareUploadError = error;
+  runtimeOTAFinish(false, Update.getError() ? Update.getError() : -1);
   Log.error(F("[WebUI][OTA] %s" CR), error.c_str());
 }
 
@@ -2329,6 +2339,8 @@ void handleLocalFirmwareUpload() {
       return;
     }
 
+    runtimeOTAStart(OTATransport::WebFile);
+
     String filename = upload.filename;
     String lowerFilename = filename;
     lowerFilename.toLowerCase();
@@ -2344,13 +2356,12 @@ void handleLocalFirmwareUpload() {
     }
 #    endif
 
-    ProcessLock = true;
-#    ifdef ZgatewayBT
-    stopProcessing(true);
-#    elif defined(ZgatewayBLETracker)
-    stopBLETracker(true);
-#    endif
     localFirmwareUploadRequiresRestart = true;
+    if (!prepareFirmwareUpdateMemory()) {
+      setLocalFirmwareUploadError("Unable to prepare OTA memory safely; retry after restart");
+      runtimeOTAFinish(false, -201);
+      return;
+    }
     gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
     last_ota_activity_millis = millis();
     lpDisplayPrint("Web OTA in progress");
@@ -2372,6 +2383,7 @@ void handleLocalFirmwareUpload() {
       return;
     }
 
+    runtimeOTAStep(OTAStage::Writing);
     size_t written = Update.write(upload.buf, upload.currentSize);
     if (written != upload.currentSize) {
       setLocalFirmwareUploadError(String("Flash write failed: ") + Update.errorString());
@@ -2384,6 +2396,8 @@ void handleLocalFirmwareUpload() {
     // while bursty clients can no longer trigger a watchdog/panic reset.
     delay(5);
     localFirmwareUploadBytes += written;
+    runtimeOTAAccepted(localFirmwareUploadBytes);
+    runtimeOTAStep(OTAStage::Receiving);
     last_ota_activity_millis = millis();
     if (localFirmwareUploadBytes >= localFirmwareNextProgressLog) {
       Log.notice(F("[WebUI][OTA] local upload progress bytes=%u heap=%u" CR),
@@ -2398,16 +2412,19 @@ void handleLocalFirmwareUpload() {
       Update.abort();
       return;
     }
+    runtimeOTAStep(OTAStage::Validating);
     if (!Update.end(true) || !Update.isFinished()) {
       setLocalFirmwareUploadError(String("Firmware validation failed: ") + Update.errorString());
       return;
     }
     localFirmwareUploadSuccess = true;
+    runtimeOTAFinish(true);
     Log.notice(F("[WebUI][OTA] local firmware validated bytes=%u md5=%s" CR),
                localFirmwareUploadBytes, Update.md5String().c_str());
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     if (Update.isRunning()) Update.abort();
     setLocalFirmwareUploadError("Firmware upload aborted by the client");
+    runtimeOTAFinish(false, -5);
     gatewayState = GatewayState::ERROR;
     delay(100);
     ESP.restart();
@@ -2419,7 +2436,7 @@ void handleLocalFirmwareUploadFinished() {
   server.sendHeader("Connection", "close");
 
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html,
            (String(gateway_name) + (localFirmwareUploadSuccess ? " - Firmware installed" : " - Firmware upload failed")).c_str());
@@ -2496,7 +2513,7 @@ void handleUP() {
     }
   }
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
 
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
@@ -2515,7 +2532,7 @@ void handleUP() {
 
 void sendRestartPage() {
   char jsonChar[100];
-  serializeJson(modules, jsonChar, measureJson(modules) + 1);
+  serializeWebModules(jsonChar);
   char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
   snprintf(buffer, WEB_TEMPLATE_BUFFER_MAX_SIZE, header_html, (String(gateway_name) + " - Updating Firmware and Restart").c_str());
@@ -2606,7 +2623,7 @@ void handleCS() {
     server.send(200, "text/plain", message);
   } else {
     char jsonChar[100];
-    serializeJson(modules, jsonChar, measureJson(modules) + 1);
+    serializeWebModules(jsonChar);
 
     char buffer[WEB_TEMPLATE_BUFFER_MAX_SIZE];
 
