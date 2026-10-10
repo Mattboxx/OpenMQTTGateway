@@ -4,6 +4,11 @@ An optional OpenMQTTGateway 1.8.1 extension for a **classic ESP32 Dev Module,
 4 MB flash and CC1101**. It does not replace upstream's other boards or gateway
 presets. Firmware version: `v1.8.1-wol-2in-2out-ble-r6`.
 
+**Stable release — status updated on 10 October 2026.** The owner reports that
+the deployed BLE firmware has remained stable so far in normal use following
+the 4 October release. This is a field-use confirmation on that installation,
+not a new build or a guarantee for every board/network configuration.
+
 ### What this edition adds, and why
 
 A garage, gate, shed or equipment cabinet can use one gateway to receive RF
@@ -65,9 +70,10 @@ actual BLE, WOL and GPIO/discovery function tests passed. Both eleven-file USB
 packages passed the actual installer's pre-serial integrity checks, including
 corrupted-image and duplicate-manifest rejection.
 
-**This is a public release, not a guarantee of zero bugs or impossible hangs.**
-Multi-week stability is not established; the owner chose to use it normally
-and report future faults instead of scheduled observation. No scheduled checks
+**Marked stable following the owner's field-use confirmation on 10 October.**
+This does not guarantee zero bugs or impossible hangs. Multi-week stability is
+not yet established; the owner chose normal use and future fault reporting
+instead of scheduled observation. No scheduled checks
 remain. Host tests mock radio, pins, scheduler and broker; they do not validate
 every RF protocol, electrical loads or all interrupt interleavings. Historical
 outages may have had more than one cause. The [investigation record](https://github.com/Mattboxx/OpenMQTTGateway/blob/feature/wol-multi-gpio-v1.8.1/docs/releases/reliability-r6-investigation.md)

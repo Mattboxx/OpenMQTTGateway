@@ -52,7 +52,7 @@ Start here:
 
 * [Detailed use case, configuration and design notes](docs/use/mqtt-wol.md)
 * [GPIO input and output wiring](docs/use/sensors.md#gpio-input)
-* [Firmware with BLE — reliability update R6](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble-r6)
+* [Firmware with BLE — stable R6](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-ble-r6)
 * [Firmware without BLE — reliability update R6](https://github.com/Mattboxx/OpenMQTTGateway/releases/tag/v1.8.1-esp32-cc1101-wol-2in-2out-no-ble-r6)
 
 ## Firmware variants
@@ -62,6 +62,11 @@ network-timer allocation panic, removes unused RF startup memory, adds checked
 RF allocation paths and hardens multipart parsing and OTA transfers. It retains
 the checked MQTT queue, recovery guards, persistent incident diagnostics and
 downloadable crash report from earlier revisions, with WOL parser/rollover fixes.
+
+The **BLE edition is marked stable as of 10 October 2026**, following the
+owner's report of stable normal use since release. The NO BLE edition shares
+the common fixes, but this field-use confirmation concerns the deployed BLE
+edition only. Firmware files are unchanged by this status update.
 
 Both variants were built and installed on the same ESP32 through local-file
 WebUI OTA, with complete pages, MQTT/RF operation and unchanged GPIO/BLE settings.

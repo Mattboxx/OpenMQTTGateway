@@ -267,6 +267,11 @@ retries later instead of discarding discovery or state data.
 
 ### Reliability revision 6 (October 2026)
 
+On 10 October 2026 the owner reported stable normal operation of the deployed
+BLE edition, which is now labelled stable on GitHub. This updates the release
+status without replacing its firmware or extending that field-use confirmation
+to the NO BLE edition. No scheduled monitoring was re-enabled.
+
 Revision 6 is the current public release. BLE and NO BLE keep the same WOL,
 two-input/two-output, WebUI and Home Assistant features; only BLE tracking
 differs. All three presets compiled, including the unchanged upstream
